@@ -1,0 +1,15 @@
+
+
+
+
+以后启动项目：
+Set-Location E:\GPTAPI3
+& ".\.venv\Scripts\python.exe" webapp\server.py
+
+以后迁移到其他电脑，安装 Python 3.12 和 Blender 后运行：
+Set-Location E:\GPTAPI3
+& .\setup_environment.ps1
+启动项目：
+Set-Location E:\GPTAPI3
+& .\.venv\Scripts\python.exe webapp\server.py
+当前允许的普通 Python 能

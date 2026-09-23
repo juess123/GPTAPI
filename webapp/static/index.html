@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>规格 → 模型</title>
+<!-- 内联 SVG 图标：不额外发请求，也免掉浏览器默认来要 /favicon.ico 的那个 404 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230071e3'/%3E%3Cg fill='none' stroke='white' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5.6 4.6 9.2 12 12.8l7.4-3.6L12 5.6Z'/%3E%3Cpath d='m4.6 13.4 7.4 3.6 7.4-3.6'/%3E%3Cpath d='m6.8 17.2 5.2 2.5 5.2-2.5'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 2 2 7l10 5 10-5-10-5Z" />
+        <path d="m2 12 10 5 10-5" />
+        <path d="m2 17 10 5 10-5" />
+      </svg>
+      <span>规格 → 模型</span>
+    </div>
+    <a class="nav-link" href="#history">历史</a>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ── 左栏：投料 → 进度 → 成品 ────────────────────────── -->
+  <div class="col-main">
+
+    <!-- ── 上传 ─────────────────────────────────────────── -->
+    <section class="card upload-card" id="uploadCard">
+      <div class="drop" id="drop" tabindex="0" role="button"
+           aria-label="点击选择文件，或把文件拖到这里">
+        <div class="drop-icon">
+          <svg viewBox="0 0 48 48" aria-hidden="true">
+            <path d="M24 32V12m0 0-7 7m7-7 7 7" />
+            <path d="M8 30v6a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-6" />
+          </svg>
+        </div>
+        <p class="drop-title">把文件拖到这里</p>
+        <p class="drop-sub">或点击选择　·　按 <kbd>Ctrl</kbd>+<kbd>V</kbd> 粘贴截图或文本</p>
+        <div class="chips">
+          <span class="chip">图片　.png .jpg .webp</span>
+          <span class="chip">规格　.md .txt .json</span>
+          <span class="chip">价目　.xlsx .xlsm</span>
+        </div>
+      </div>
+
+      <div class="paste-toast" id="pasteToast" hidden></div>
+
+      <ul class="filelist" id="filelist" hidden></ul>
+
+      <div class="prompt-box">
+        <label for="userPrompt">补充提示词 <span>可选</span></label>
+        <textarea id="userPrompt" maxlength="20000" rows="3"
+          placeholder="例如：整体使用暖色木纹，报价表增加运输费和安装费……"></textarea>
+        <div class="prompt-meta"><span>留空则不添加文字要求</span><span id="promptCount">0 / 20000</span></div>
+      </div>
+
+      <div class="notice" id="notice" hidden></div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="submit" disabled>
+          <span>开始生成</span>
+        </button>
+        <button class="btn btn-ghost" id="clear" hidden>全部移除</button>
+      </div>
+    </section>
+
+    <!-- ── 进度 ─────────────────────────────────────────── -->
+    <section class="card progress-card" id="progressCard" hidden>
+      <div class="progress-head">
+        <div>
+          <p class="eyebrow" id="stageLabel">准备中</p>
+          <p class="progress-sub" id="stageSub">正在建立任务…</p>
+        </div>
+        <div class="pct" id="pctLabel">0<i>%</i></div>
+      </div>
+
+      <div class="bar" id="bar"><div class="bar-fill" id="barFill"></div></div>
+
+      <div class="notice" id="progNotice" hidden></div>
+
+      <div class="meta-row">
+        <span id="elapsed">0:00</span>
+        <button class="linkbtn" id="toggleLog">显示日志</button>
+      </div>
+
+      <div class="console" id="console" hidden><pre id="logBody"></pre></div>
+    </section>
+
+    <!-- ── 结果 ─────────────────────────────────────────── -->
+    <section class="card result-card" id="resultCard" hidden>
+      <div class="result-head">
+        <div class="tick">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4L19 7"/></svg>
+        </div>
+        <div>
+          <p class="eyebrow success">已完成</p>
+          <p class="progress-sub" id="resultSub"></p>
+        </div>
+      </div>
+
+      <div class="dl-grid" id="dlGrid"></div>
+
+      <div class="extras" id="extras" hidden></div>
+    </section>
+
+    <!-- ── 失败 ─────────────────────────────────────────── -->
+    <section class="card fail-card" id="failCard" hidden>
+      <p class="eyebrow fail">未完成</p>
+      <p class="fail-msg" id="failMsg"></p>
+      <div class="console open" id="failConsole"><pre id="failLog"></pre></div>
+    </section>
+
+  </div>
+
+  <!-- ── 右栏：历史记录 ────────────────────────────────────── -->
+  <aside class="col-side">
+    <section class="hist-panel" id="history">
+      <h2>历史记录</h2>
+      <ul class="hist-list" id="histList"></ul>
+    </section>
+  </aside>
+
+</main>
+
+<input type="file" id="picker" multiple hidden
+       accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.md,.txt,.json,.csv,.yaml,.yml,.ini,.log,.xlsx,.xlsm">
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Project-local Python and Blender environments
+.venv/
+.blender_packages/
+
+# Runtime-generated model scripts and responses
+pipeline/generated/
+
+# User uploads, per-task packages, logs, renders, and deliverables
+webapp/workspaces/
+
+# Python caches and test/tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime output and logs
+output/
+*.log
+*.lock
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

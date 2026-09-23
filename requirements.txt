@@ -1,0 +1,32 @@
+# A′ 流水线依赖
+# 说明：.blend 由本机 Blender 生成；Blender 第三方依赖见 requirements-blender.txt。
+
+# 生成 make_xlsx.py 用到的表格库（Blender 侧的 bpy 由 Blender 自带）
+openpyxl==3.1.5
+XlsxWriter==3.2.2
+numpy==2.3.5
+pandas==2.2.3
+scipy==1.16.3
+Pillow==12.1.0
+matplotlib==3.10.1
+trimesh==4.6.4
+shapely==2.1.2
+ezdxf==1.4.3
+networkx==3.7
+sympy==1.14.0
+imageio==2.37.4
+svgwrite==1.4.3
+svgpathtools==1.8.0
+scikit-image==0.26.0
+pyclipper==1.4.0
+mapbox-earcut==2.1.0
+manifold3d==3.5.3
+python-docx==1.2.0
+pypdf==6.19.0
+reportlab==5.0.1
+plotly==7.1.0
+
+# Web 界面（webapp/server.py）；不需要 Web 界面时可以不装
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-multipart==0.0.32

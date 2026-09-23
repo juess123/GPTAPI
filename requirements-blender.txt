@@ -1,0 +1,17 @@
+# Locked allow-list installed into .blender_packages with Blender's Python.
+# bpy itself is supplied by Blender and must not be installed with pip.
+numpy==2.3.5
+scipy==1.16.3
+Pillow==12.1.0
+trimesh==4.6.4
+shapely==2.1.2
+ezdxf==1.4.3
+networkx==3.7
+sympy==1.14.0
+imageio==2.37.4
+svgwrite==1.4.3
+svgpathtools==1.8.0
+scikit-image==0.26.0
+pyclipper==1.4.0
+mapbox-earcut==2.1.0
+manifold3d==3.5.3
