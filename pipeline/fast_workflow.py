@@ -25,8 +25,16 @@ def main():
     gen_dir = Path(args.gen_dir).resolve()
     out_root = Path(args.out_dir).resolve()
     task_packages = Path(args.task_packages).resolve()
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    model_spec = gen_dir / "model_spec.json"
+    if run([sys.executable, str(HERE / "extract_model_spec.py"),
+            "--input-dir", args.input_dir, "--gen-dir", str(gen_dir)]):
+        return 1
+    if run([sys.executable, str(HERE / "validate_model_spec.py"),
+            "--spec", str(model_spec), "--lock"]):
+        return 1
     if run([sys.executable, str(HERE / "ask_model.py"), "--input-dir", args.input_dir,
-            "--gen-dir", str(gen_dir)]):
+            "--gen-dir", str(gen_dir), "--model-spec", str(model_spec)]):
         return 1
     dependencies = gen_dir / "dependencies.json"
     if not dependencies.is_file():
@@ -40,6 +48,10 @@ def main():
     blend_repairs = 0
     xlsx_repairs = 0
     while True:
+        if run([sys.executable, str(HERE / "validate_model_spec.py"),
+                "--spec", str(model_spec)]):
+            print("[错误] model_spec.json 锁校验失败，拒绝继续生成或修复", file=sys.stderr)
+            return 1
         current_build_cmd = list(build_cmd)
         if blend_repairs >= 2:
             current_build_cmd.append("--allow-validation-failure")

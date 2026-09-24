@@ -13,6 +13,7 @@ from mathutils import Vector
 
 BLEND_IN = Path(os.environ["BLEND_IN"]).resolve()
 REPORT = Path(os.environ["VALIDATION_REPORT"]).resolve()
+MODEL_SPEC = Path(os.environ["MODEL_SPEC_PATH"]).resolve() if os.environ.get("MODEL_SPEC_PATH") else None
 EPS_M = 1e-6
 
 errors: list[dict] = []
@@ -109,6 +110,22 @@ def check_metadata() -> list:
 
 
 def parse_spec() -> dict:
+    if MODEL_SPEC is not None:
+        if not MODEL_SPEC.is_file():
+            issue(errors, "MISSING_EXTERNAL_MODEL_SPEC", "外部锁定的 model_spec.json 不存在",
+                  path=str(MODEL_SPEC))
+            return {}
+        try:
+            spec = json.loads(MODEL_SPEC.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            issue(errors, "INVALID_EXTERNAL_MODEL_SPEC", "外部 model_spec.json 无法读取",
+                  path=str(MODEL_SPEC), error=str(exc))
+            return {}
+        if not isinstance(spec, dict):
+            issue(errors, "INVALID_EXTERNAL_MODEL_SPEC", "外部 model_spec.json 顶层必须是对象")
+            return {}
+        info.append({"code": "SPEC_SOURCE", "source": "external_locked_file", "path": str(MODEL_SPEC)})
+        return spec
     raw = bpy.context.scene.get("validation_spec_json")
     if not isinstance(raw, str) or not raw.strip():
         issue(errors, "MISSING_VALIDATION_SPEC", "场景缺少 validation_spec_json")
@@ -222,11 +239,44 @@ def check_counts(spec: dict, relevant: list) -> None:
     actual = defaultdict(set)
     for obj in relevant:
         actual[str(obj.get("component_type", ""))].add(str(obj.get("component_id", "")))
-    for component_type, expected in spec.get("expected_counts", {}).items():
+    expected_counts = spec.get("expected_counts", {})
+    if not isinstance(expected_counts, dict):
+        issue(errors, "INVALID_EXPECTED_COUNTS", "expected_counts 必须是对象")
+        return
+    for component_type, expected in expected_counts.items():
+        status = "confirmed"
+        if isinstance(expected, dict):
+            status = str(expected.get("status", "assumption"))
+            expected_value = expected.get("value")
+        else:
+            expected_value = expected
+        if expected_value is None or status == "conflict":
+            issue(warnings, "COUNT_NOT_ENFORCED", f"{component_type} 数量未作为硬约束",
+                  component_type=component_type, status=status, expected=expected)
+            continue
+        if isinstance(expected_value, bool) or not isinstance(expected_value, (int, float)):
+            issue(errors, "INVALID_EXPECTED_COUNT", f"{component_type} 的期望数量格式无效",
+                  component_type=component_type, received=expected)
+            continue
+        wanted = int(expected_value)
         count = len(actual.get(str(component_type), set()))
-        if count != int(expected):
-            issue(errors, "COMPONENT_COUNT_MISMATCH", f"{component_type} 数量不一致",
-                  component_type=component_type, expected=int(expected), actual=count)
+        if count != wanted:
+            bucket = errors if status in {"confirmed", "derived"} else warnings
+            issue(bucket, "COMPONENT_COUNT_MISMATCH", f"{component_type} 数量不一致",
+                  component_type=component_type, expected=wanted, actual=count, status=status)
+
+
+def check_required_features(spec: dict, relevant: list) -> None:
+    actual_types = {str(obj.get("component_type", "")) for obj in relevant}
+    for feature in spec.get("required_features", []):
+        if not isinstance(feature, dict) or not feature.get("required"):
+            continue
+        if feature.get("status") not in {"confirmed", "derived"}:
+            continue
+        component_type = str(feature.get("component_type") or "").strip()
+        if component_type and component_type not in actual_types:
+            issue(errors, "MISSING_REQUIRED_FEATURE", "缺少锁定标准要求的必备构件",
+                  feature_id=feature.get("id"), component_type=component_type)
 
 
 def overlap_amount(a, b, axis: int) -> float:
@@ -240,9 +290,10 @@ def check_spatial(spec: dict) -> None:
     for rule in spec.get("spatial_rules", []):
         if not isinstance(rule, dict):
             continue
-        kind = str(rule.get("kind", ""))
-        subject_id = str(rule.get("subject", ""))
-        host_id = str(rule.get("host", rule.get("other", "")))
+        kind = str(rule.get("kind", rule.get("type", rule.get("rule", ""))))
+        subject_id = str(rule.get("subject", rule.get("a", "")))
+        host_id = str(rule.get("host", rule.get("other",
+                      rule.get("object", rule.get("target", rule.get("reference", rule.get("b", "")))))))
         subject = bounds.get(subject_id)
         host = bounds.get(host_id) if host_id else None
         tolerance = float(rule.get("tolerance_mm", 5.0)) / 1000.0
@@ -292,11 +343,16 @@ def check_spatial(spec: dict) -> None:
                       overlap_mm=[value * 1000.0 for value in overlaps], rule=rule)
 
 
-spec = parse_spec()
-relevant_objects = check_metadata()
-check_overall(spec, relevant_objects)
-check_counts(spec, relevant_objects)
-check_spatial(spec)
+try:
+    spec = parse_spec()
+    relevant_objects = check_metadata()
+    check_overall(spec, relevant_objects)
+    check_counts(spec, relevant_objects)
+    check_required_features(spec, relevant_objects)
+    check_spatial(spec)
+except Exception as exc:
+    issue(errors, "VALIDATOR_INTERNAL_ERROR", "验证器内部异常，已转换为报告而不是中断",
+          exception_type=type(exc).__name__, error=str(exc))
 
 report = {
     "schema": 1,

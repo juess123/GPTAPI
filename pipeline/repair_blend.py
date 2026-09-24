@@ -1,4 +1,4 @@
-"""Ask the configured model to repair make_blend.py from a validation report."""
+"""Repair make_blend.py with small, exact replacements; never regenerate it wholesale."""
 from __future__ import annotations
 
 import argparse
@@ -7,36 +7,34 @@ import sys
 from pathlib import Path
 
 import ask_model
-
+from local_repair_utils import apply_replacements, parse_repair_plan
 
 ROOT = Path(__file__).resolve().parent.parent
 
-REPAIR_PROMPT = """修复下面的 Blender 生成脚本。诊断材料可能是空间验证报告，也可能是运行时
-Traceback报告。只输出完整 make_blend.py，不要解释。
+PROMPT = """请局部修复下面的 make_blend.py。只输出一个JSON对象，不要Markdown、完整脚本或解释。
 
-这是自动修复，不是重新设计：
-1. 只修复诊断报告中的错误以及导致错误的空间关系、模型结构、Python调用或 Blender API 问题。
-2. 不得修改用户明确确认的尺寸、数量、材料和文字要求。
-3. 不得增大 tolerance、把 confirmed 改成 assumption、删除 validation_spec_json，或把错误工程对象改成
-   exclude_from_quote=True / quote_relevant=False 来绕过验证。
-4. 保留并修正 component_id、instance_id、component_type、quote_relevant、exclude_from_quote。
-5. 不得启动 pip、blender.exe、make_xlsx.py 或其他交付脚本；不得增加新的第三方依赖。
-6. 必须继续从 OUT_DIR 写出 final_model.blend；保存后直接结束，不重新打开或自行验证。
-7. Blender 版本兼容必须运行时探测，尤其处理 tessellate_polygon 返回索引或 Vector、集合成员按名称判断。
+这是局部修复，不是重新设计：
+1. 只修改诊断报告直接涉及的代码；保留其他造型、尺寸、材料、相机、灯光、渲染和报价映射。
+2. 禁止返回完整脚本。每个old必须从当前脚本逐字复制、包含足够上下文并且只出现一次。
+3. 可用一次替换修改函数、参数块或插入少量代码；最多20处。
+4. 禁止放宽容差、删除必备构件、降低数量、修改锁定标准或用隐藏/排除分类绕过验证。
+5. 禁止启动pip、Blender、Excel或其他脚本，也不得增加新依赖。
 
-════════════════ 诊断报告 ════════════════
+严格输出结构：
+{
+  "replacements": [
+    {"old": "当前脚本中唯一存在的完整原文", "new": "替换后的代码", "reason": "对应的错误"}
+  ]
+}
+
+==================== 诊断报告 ====================
 {report}
-════════════════ 当前 make_blend.py ════════════════
+==================== 锁定标准 ====================
+{spec}
+==================== 当前脚本 ====================
 {script}
-════════════════ 原始文本材料 ════════════════
+==================== 原始文字材料 ====================
 {materials}
-
-严格输出：
-<<<FILE:make_blend.py>>>
-```python
-完整修复代码
-```
-<<<ENDFILE>>>
 """
 
 
@@ -47,56 +45,66 @@ def main() -> int:
     parser.add_argument("--report", required=True)
     parser.add_argument("--attempt", type=int, required=True)
     args = parser.parse_args()
-
     input_dir = Path(args.input_dir).resolve()
     gen_dir = Path(args.gen_dir).resolve()
     report_path = Path(args.report).resolve()
     script_path = gen_dir / "make_blend.py"
-    if not script_path.is_file() or not report_path.is_file():
-        print("[错误] 自动修复缺少 make_blend.py 或诊断报告", file=sys.stderr)
+    spec_path = gen_dir / "model_spec.json"
+    if not all(path.is_file() for path in (report_path, script_path, spec_path)):
+        print("[错误] 局部修复缺少报告、make_blend.py或model_spec.json", file=sys.stderr)
         return 1
 
     materials, images, _ = ask_model.collect_inputs(input_dir)
     report = report_path.read_text(encoding="utf-8", errors="replace")
     script = script_path.read_text(encoding="utf-8", errors="replace")
-    prompt = REPAIR_PROMPT.format(report=report, script=script, materials=materials or "（仅提供图片）")
+    spec = spec_path.read_text(encoding="utf-8", errors="strict")
+    prompt = PROMPT.replace("{report}", report).replace("{spec}", spec) \
+                   .replace("{script}", script).replace("{materials}", materials or "（仅有图片）")
     content = [{"type": "text", "text": prompt}]
     if images:
-        content.append({"type": "text", "text": "原始参考图片如下，仅用于核对结构和空间关系："})
+        content.append({"type": "text", "text": "参考图片仅用于核对诊断涉及的结构，不得借机重新设计："})
         content.extend(images)
 
     env = ask_model.load_env(ROOT / ".env")
+
     class Settings:
         timeout = None
         attempts = None
         max_tokens = None
-    timeout, attempts, max_tokens = ask_model.resolve_settings(Settings, env)
+
+    timeout, attempts, _ = ask_model.resolve_settings(Settings, env)
     result = None
-    repaired = None
+    updated = None
+    replacements = None
+    last_error = ""
     for content_attempt in range(1, 3):
         result = ask_model.post_json(
             env["CNXMAI_CHAT_URL"],
             {"model": env["CNXMAI_MODEL"], "messages": [{"role": "user", "content": content}],
-             "max_tokens": max_tokens},
+             "max_tokens": 16000, "temperature": 0},
             env["CNXMAI_API_KEY"], timeout=timeout, max_attempts=attempts,
         )
-        text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        repaired = ask_model.extract_files(text).get("make_blend.py")
-        if repaired:
+        response = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        try:
+            replacements = parse_repair_plan(response)
+            updated = apply_replacements(script, replacements)
             break
-        print(f"自动修复响应不完整（内容尝试 {content_attempt}/2）", flush=True)
-        content[0]["text"] += "\n\n上一次回答为空或格式不完整。请从头输出完整 make_blend.py。"
+        except (ValueError, json.JSONDecodeError, SyntaxError) as exc:
+            last_error = str(exc)
+            print(f"局部补丁无效（内容尝试 {content_attempt}/2）：{last_error}", flush=True)
+            content[0]["text"] += f"\n上一补丁被拒绝：{last_error}。请重新输出更小且old唯一匹配的JSON补丁。"
 
     (gen_dir / f"raw_repair_response_{args.attempt}.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    if not repaired:
-        print("[错误] 模型连续两次没有返回完整 make_blend.py", file=sys.stderr)
+    if updated is None or replacements is None:
+        print(f"[错误] 无法生成可安全应用的局部补丁：{last_error}", file=sys.stderr)
         return 1
     archive = gen_dir / f"make_blend.attempt-{args.attempt}.py"
     archive.write_text(script, encoding="utf-8")
-    script_path.write_text(repaired, encoding="utf-8")
-    print(f"已保存修复前脚本：{archive}")
-    print(f"已写入修复脚本：{script_path}（{len(repaired.splitlines())} 行）")
+    script_path.write_text(updated, encoding="utf-8")
+    plan_path = gen_dir / f"blend-local-repair-{args.attempt}.json"
+    plan_path.write_text(json.dumps({"replacements": replacements}, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"已安全应用Blender局部补丁：{len(replacements)}处；原脚本：{archive}")
     return 0
 
 

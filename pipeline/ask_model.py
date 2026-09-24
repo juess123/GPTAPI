@@ -493,6 +493,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="投料口目录（默认 <仓库>/input）。Web 后端为每个任务指定独立目录")
     p.add_argument("--gen-dir", default=None,
                    help="模型产出脚本的存放目录（默认 <仓库>/pipeline/generated）")
+    p.add_argument("--model-spec", default=None,
+                   help="建模前已校验并锁定的 model_spec.json")
     p.add_argument("--dry-run", action="store_true",
                    help="只打印将发送的提示词与参数，不实际请求")
     p.add_argument("--installed-only", action="store_true",
@@ -571,6 +573,25 @@ def main(argv: list[str] | None = None) -> int:
                         .replace("{xlsx_name}", XLSX_NAME) \
                         .replace("{blend_name}", BLEND_NAME) \
                         .replace("{available_packages}", available_packages())
+
+    if args.model_spec:
+        spec_path = Path(args.model_spec).expanduser().resolve()
+        if not spec_path.is_file():
+            print(f"错误：锁定规格不存在：{spec_path}")
+            return 1
+        locked_spec = spec_path.read_text(encoding="utf-8")
+        prompt += f"""
+
+==================== 锁定的工程标准（不可修改）====================
+{locked_spec}
+================================================================
+以上 model_spec.json 在建模前已由输入材料提取并锁定，是 Blender 与 Excel 的共同标准：
+1. 两个脚本必须遵守其中 confirmed 和 derived 的尺寸、数量、必备功能及报价要求。
+2. 不得重新解释标准，不得把 required=true 改为 false，不得把必备构件数量改成0。
+3. make_blend.py 中的 validation_spec_json 只能复制这份标准的相关字段，不得另造较宽松标准。
+4. component_type 必须与 expected_counts 的键完全一致，以便外部验证器独立计数。
+5. make_xlsx.py 必须覆盖 quote_requirements 中 required=true 的项目，并与 Blender 构件数量保持一致。
+"""
 
     # 多模态 content：文字在前，图片在后并带一句引导
     content: list[dict] = [{"type": "text", "text": prompt}]

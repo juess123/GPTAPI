@@ -194,6 +194,9 @@ def main() -> int:
     child_env = os.environ.copy()
     child_env["OUT_DIR"] = str(run_dir)
     child_env["PYTHONIOENCODING"] = "utf-8"
+    model_spec = GEN / "model_spec.json"
+    if model_spec.is_file():
+        child_env["MODEL_SPEC_PATH"] = str(model_spec)
     if task_packages_dir:
         python_packages = task_packages_dir / "python"
         blender_packages = task_packages_dir / "blender"
@@ -253,6 +256,12 @@ def main() -> int:
         "validate-blend", env=child_env,
     )
     if not ok or "Traceback (most recent call last)" in out:
+        if not validation_report.is_file():
+            write_build_failure(
+                run_dir, "blender_validator_error",
+                "validate_blend.py 在写出验证报告前异常退出",
+                out, validator=str(validator), blend=str(blend), model_spec=str(model_spec),
+            )
         if allow_validation_failure and validation_report.is_file():
             print("\n[警告] Blender 自动修复已达到 2 次上限；保留 validation_report.json，"
                   "不再修改 make_blend.py，继续生成 Excel。")
@@ -282,6 +291,24 @@ def main() -> int:
         )
         return fail(f"make_xlsx.py 没报错，但未产出 {XLSX_NAME}")
     print(f"  -> {xlsx}  ({xlsx.stat().st_size} 字节)")
+
+    if model_spec.is_file():
+        xlsx_validation_report = run_dir / "xlsx_validation_report.json"
+        ok, validation_out = run(
+            [sys.executable, str(HERE / "validate_xlsx.py"),
+             "--xlsx", str(xlsx), "--spec", str(model_spec),
+             "--report", str(xlsx_validation_report)],
+            "validate-xlsx", env=child_env,
+        )
+        if not ok:
+            write_build_failure(
+                run_dir, "xlsx_validation_error",
+                "Excel与锁定的 model_spec.json 不一致",
+                validation_out, filename="xlsx_failure.json", script=str(xlsx_script),
+                model_spec=str(model_spec), validation_report=str(xlsx_validation_report),
+                model_manifest=str(run_dir / "model_manifest.json"),
+            )
+            return fail("Excel成品验证失败；已生成 xlsx_validation_report.json")
 
     # ---- 汇总 ----
     print("\n" + "=" * 60)
