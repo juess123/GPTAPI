@@ -152,8 +152,10 @@ def make_run_dir(name: str | None) -> Path:
 def main() -> int:
     strict = "--strict" in sys.argv
     allow_validation_failure = "--allow-validation-failure" in sys.argv
+    skip_optional_renders = "--skip-optional-renders" in sys.argv
     run_name = None
     task_packages_dir = None
+    input_dir = ROOT / "input"
     if "--run-name" in sys.argv:
         i = sys.argv.index("--run-name")
         if i + 1 >= len(sys.argv):
@@ -177,6 +179,11 @@ def main() -> int:
         if i + 1 >= len(sys.argv):
             return fail("--task-packages-dir 后面要跟一个目录路径")
         task_packages_dir = Path(sys.argv[i + 1]).expanduser().resolve()
+    if "--input-dir" in sys.argv:
+        i = sys.argv.index("--input-dir")
+        if i + 1 >= len(sys.argv):
+            return fail("--input-dir 后面要跟一个目录路径")
+        input_dir = Path(sys.argv[i + 1]).expanduser().resolve()
 
     xlsx_script = GEN / "make_xlsx.py"
     blend_script = GEN / "make_blend.py"
@@ -194,6 +201,9 @@ def main() -> int:
     child_env = os.environ.copy()
     child_env["OUT_DIR"] = str(run_dir)
     child_env["PYTHONIOENCODING"] = "utf-8"
+    if skip_optional_renders:
+        child_env["PIPELINE_SKIP_OPTIONAL_RENDERS"] = "1"
+        print("  [快速修复] 已要求生成脚本跳过可选高质量预览渲染")
     model_spec = GEN / "model_spec.json"
     if model_spec.is_file():
         child_env["MODEL_SPEC_PATH"] = str(model_spec)
@@ -245,28 +255,85 @@ def main() -> int:
 
     print(f"  -> {blend}  ({blend.stat().st_size} 字节)")
 
-    # ---- 固定验证器：从已保存的真实 .blend 读取几何和空间关系 ----
+    # ---- 分层验证：程序化结构 -> 固定验证视图 -> 提示词与参考图 -> 合并报告 ----
+    geometry_report = run_dir / "geometry_validation_report.json"
     validation_report = run_dir / "validation_report.json"
     child_env["BLEND_IN"] = str(blend)
-    child_env["VALIDATION_REPORT"] = str(validation_report)
+    child_env["VALIDATION_REPORT"] = str(geometry_report)
     validator = HERE / "validate_blend.py"
-    ok, out = run(
+    geometry_ok, geometry_out = run(
         [blender, "--background", "--factory-startup", str(blend),
          "--python-exit-code", "1", "--python", str(validator)],
         "validate-blend", env=child_env,
     )
-    if not ok or "Traceback (most recent call last)" in out:
-        if not validation_report.is_file():
-            write_build_failure(
-                run_dir, "blender_validator_error",
-                "validate_blend.py 在写出验证报告前异常退出",
-                out, validator=str(validator), blend=str(blend), model_spec=str(model_spec),
+    if not geometry_report.is_file():
+        write_build_failure(
+            run_dir, "blender_validator_error",
+            "validate_blend.py 在写出几何报告前异常退出",
+            geometry_out, validator=str(validator), blend=str(blend), model_spec=str(model_spec),
+        )
+        return fail("Blender结构验证器异常，未能生成 geometry_validation_report.json")
+
+    visual_report = None
+    if model_spec.is_file() and input_dir.is_dir():
+        views_dir = run_dir / "_validation_views"
+        child_env["VALIDATION_VIEWS_DIR"] = str(views_dir)
+        views_ok, views_out = run(
+            [blender, "--background", "--factory-startup", str(blend),
+             "--python-exit-code", "1", "--python", str(HERE / "render_validation_views.py")],
+            "render-validation-views", env=child_env,
+        )
+        visual_report = run_dir / "visual_validation_report.json"
+        if not views_ok:
+            print("\n[警告] 固定验证视图生成失败；这属于验证证据不足，"
+                  "不修改 Blender 模型，继续保留程序化结构验证结果。")
+            visual_report.write_text(json.dumps({
+                "schema": 1,
+                "status": "passed",
+                "errors": [],
+                "warnings": [{
+                    "code": "VALIDATION_VIEWS_UNAVAILABLE",
+                    "message": "固定验证视图生成失败，未执行GPT视觉验收",
+                    "output": views_out[-12000:],
+                }],
+                "info": [],
+                "validation_views": [],
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        else:
+            visual_ok, visual_out = run(
+                [sys.executable, str(HERE / "validate_visual.py"),
+                 "--input-dir", str(input_dir), "--spec", str(model_spec),
+                 "--views-dir", str(views_dir), "--structure-report", str(geometry_report),
+                 "--report", str(visual_report)],
+                "validate-requirements-visual", env=child_env,
             )
-        if allow_validation_failure and validation_report.is_file():
-            print("\n[警告] Blender 自动修复已达到 2 次上限；保留 validation_report.json，"
+            if not visual_report.is_file():
+                print("\n[警告] GPT视觉验收未生成可解析报告；这属于验证器异常，"
+                      "不修改 Blender 模型，继续保留程序化结构验证结果。")
+                visual_report.write_text(json.dumps({
+                    "schema": 1,
+                    "status": "passed",
+                    "errors": [],
+                    "warnings": [{
+                        "code": "VISUAL_VALIDATOR_UNAVAILABLE",
+                        "message": "GPT视觉验收没有生成报告",
+                        "output": visual_out[-12000:],
+                    }],
+                    "info": [],
+                    "validation_views": [str(path) for path in sorted(views_dir.glob("validation_*.png"))],
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    merge_cmd = [sys.executable, str(HERE / "merge_validation_reports.py"),
+                 "--structure", str(geometry_report), "--report", str(validation_report)]
+    if visual_report is not None:
+        merge_cmd.extend(["--visual", str(visual_report)])
+    merged_ok, merged_out = run(merge_cmd, "merge-validation", env=child_env)
+    if not merged_ok:
+        if allow_validation_failure:
+            print("\n[警告] Blender 自动修复已达到 2 次上限；保留分层验证报告，"
                   "不再修改 make_blend.py，继续生成 Excel。")
         else:
-            return fail("Blender 几何/空间关系验证失败；已生成 validation_report.json")
+            return fail("Blender提示词/外观/结构验证失败；已生成 validation_report.json")
 
     # ---- 步骤 2: 再生成 xlsx ----
     print("\n" + "=" * 60)

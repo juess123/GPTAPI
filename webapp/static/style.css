@@ -341,6 +341,30 @@ kbd {
 .badge.xlsx  { background: linear-gradient(160deg, #30d158, #0f9d58); }
 .badge.text  { background: linear-gradient(160deg, #64a8ff, #0071e3); }
 
+.file-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 9px;
+  background: linear-gradient(160deg, #ff9f0a, #ff6a00);
+  cursor: zoom-in;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .12);
+}
+.file-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.file-thumb:hover { border-color: var(--accent); }
+.file-thumb:focus-visible {
+  outline: 3px solid var(--accent-weak);
+  border-color: var(--accent);
+}
+
 .f-name {
   flex: 1;
   min-width: 0;
@@ -372,6 +396,101 @@ kbd {
   transition: background .2s var(--ease), color .2s var(--ease);
 }
 .f-del:hover { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+
+/* ── 本地图片预览 ──────────────────────────────────────────── */
+
+body.preview-open { overflow: hidden; }
+.image-preview[hidden] { display: none; }
+.image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 64px;
+  align-items: center;
+  gap: 12px;
+  padding: 34px;
+  background: rgba(0, 0, 0, .82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.preview-figure {
+  min-width: 0;
+  max-width: min(1100px, 82vw);
+  max-height: 88vh;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.preview-figure img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(88vh - 54px);
+  object-fit: contain;
+  border-radius: 12px;
+  background: #111;
+  box-shadow: 0 20px 70px rgba(0, 0, 0, .5);
+}
+.preview-figure figcaption {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: baseline;
+  gap: 12px;
+  color: #fff;
+  font-size: 14px;
+}
+.preview-figure figcaption span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preview-figure figcaption small { flex: none; color: rgba(255, 255, 255, .62); }
+.preview-close,
+.preview-nav {
+  border: 0;
+  color: #fff;
+  background: rgba(255, 255, 255, .13);
+  cursor: pointer;
+  transition: background .18s var(--ease), transform .18s var(--ease-out);
+}
+.preview-close:hover,
+.preview-nav:hover { background: rgba(255, 255, 255, .24); }
+.preview-close:active,
+.preview-nav:active { transform: scale(.94); }
+.preview-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  font-size: 28px;
+  line-height: 1;
+}
+.preview-nav {
+  width: 52px;
+  height: 68px;
+  border-radius: 14px;
+  font-size: 42px;
+  line-height: 1;
+}
+.preview-prev { justify-self: end; }
+.preview-next { justify-self: start; }
+
+@media (max-width: 620px) {
+  .image-preview {
+    grid-template-columns: 42px minmax(0, 1fr) 42px;
+    gap: 6px;
+    padding: 58px 10px 20px;
+  }
+  .preview-nav { width: 40px; height: 56px; font-size: 34px; }
+  .preview-figure { max-width: 100%; }
+  .preview-figure figcaption { flex-direction: column; align-items: center; gap: 2px; }
+}
 
 /* ── 提示条 ────────────────────────────────────────────────── */
 

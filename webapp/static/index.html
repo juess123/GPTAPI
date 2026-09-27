@@ -131,6 +131,20 @@
 <input type="file" id="picker" multiple hidden
        accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.md,.txt,.json,.csv,.yaml,.yml,.ini,.log,.xlsx,.xlsm">
 
+<div class="image-preview" id="imagePreview" role="dialog" aria-modal="true"
+     aria-labelledby="previewName" hidden>
+  <button class="preview-close" id="previewClose" type="button" aria-label="关闭图片预览">×</button>
+  <button class="preview-nav preview-prev" id="previewPrev" type="button" aria-label="上一张图片">‹</button>
+  <figure class="preview-figure">
+    <img id="previewImage" alt="">
+    <figcaption>
+      <span id="previewName"></span>
+      <small id="previewMeta"></small>
+    </figcaption>
+  </figure>
+  <button class="preview-nav preview-next" id="previewNext" type="button" aria-label="下一张图片">›</button>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

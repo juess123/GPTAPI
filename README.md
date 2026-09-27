@@ -54,7 +54,7 @@ Set-Location E:\GPTAPI3
 | `CNXMAI_BASE_URL` | `https://api.qnaigc.com/v1` |
 | `CNXMAI_CHAT_URL` | `https://api.qnaigc.com/v1/chat/completions` |
 | `CNXMAI_MODEL` | `openai/gpt-6-astra`（支持图片输入） |
-| `CNXMAI_MAX_TOKENS` | **上限 128000**，写更大在请求入口就被 400 拒掉 |
+| `CNXMAI_MAX_TOKENS` | 单次回复最大 Token 数，当前项目设置为 **320000**；实际可用上限取决于模型和网关 |
 | `CNXMAI_TIMEOUT` | `40m` 这类时长写法 |
 | `WEBAPP_HOST` / `WEBAPP_PORT` | 可选，默认 `0.0.0.0:8000`（监听全部网卡） |
 

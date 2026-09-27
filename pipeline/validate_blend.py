@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -64,6 +65,33 @@ def component_objects() -> dict[str, list]:
     return result
 
 
+def object_component_types(obj) -> set[str]:
+    """Read primary and semantic type aliases without relying on one label."""
+    result: set[str] = set()
+    for key in ("component_type", "semantic_component_type", "component_types"):
+        raw = obj.get(key)
+        values = []
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text.startswith("["):
+                try:
+                    decoded = json.loads(text)
+                    values = decoded if isinstance(decoded, list) else [decoded]
+                except json.JSONDecodeError:
+                    values = [text]
+            else:
+                values = [part.strip() for part in text.replace("|", ",").split(",")]
+        elif isinstance(raw, (list, tuple, set)):
+            values = list(raw)
+        elif raw is not None:
+            try:
+                values = list(raw)
+            except TypeError:
+                values = [raw]
+        result.update(str(value).strip() for value in values if str(value).strip())
+    return result
+
+
 def check_metadata() -> list:
     relevant = []
     instance_ids = []
@@ -72,20 +100,25 @@ def check_metadata() -> list:
             continue
         has_classification = "quote_relevant" in obj and "exclude_from_quote" in obj
         if not has_classification:
-            issue(errors, "UNCLASSIFIED_OBJECT", f"对象 {obj.name} 没有工程/辅助分类", object=obj.name)
-            continue
-        quote_relevant = bool(obj.get("quote_relevant"))
-        excluded = bool(obj.get("exclude_from_quote"))
+            issue(warnings, "UNCLASSIFIED_OBJECT", f"对象 {obj.name} 没有工程/辅助分类", object=obj.name)
+            # Keep physical geometry in structural checks; missing bookkeeping
+            # must not make a real component disappear from validation.
+            quote_relevant = True
+            excluded = False
+        else:
+            quote_relevant = bool(obj.get("quote_relevant"))
+            excluded = bool(obj.get("exclude_from_quote"))
         if quote_relevant and excluded:
-            issue(errors, "CONFLICTING_CLASSIFICATION", f"对象 {obj.name} 同时参与报价又被排除", object=obj.name)
+            issue(warnings, "CONFLICTING_CLASSIFICATION", f"对象 {obj.name} 同时参与报价又被排除", object=obj.name)
         if not quote_relevant or excluded:
             continue
         relevant.append(obj)
         component_id = str(obj.get("component_id", "")).strip()
         instance_id = str(obj.get("instance_id", "")).strip()
+        component_types = object_component_types(obj)
         component_type = str(obj.get("component_type", "")).strip()
-        if not component_id or not instance_id or not component_type:
-            issue(errors, "MISSING_COMPONENT_METADATA", f"工程对象 {obj.name} 缮信息",
+        if not component_id or not instance_id or not component_types:
+            issue(warnings, "MISSING_COMPONENT_METADATA", f"工程对象 {obj.name} 缮信息",
                   object=obj.name, component_id=component_id, instance_id=instance_id,
                   component_type=component_type)
         if instance_id:
@@ -167,6 +200,10 @@ def overall_objects(spec: dict, relevant: list) -> list:
                      or spec.get("overall_include_component_ids"))
     component_types = (scope.get("component_types") or overall.get("component_types")
                        or spec.get("overall_include_component_types"))
+    excluded_types = scope.get("exclude_component_types", [])
+    if isinstance(excluded_types, (list, tuple, set)) and excluded_types:
+        denied = {str(value) for value in excluded_types}
+        eligible = [obj for obj in eligible if str(obj.get("component_type", "")) not in denied]
 
     if isinstance(names, (list, tuple, set)) and names:
         allowed = {str(value) for value in names}
@@ -208,8 +245,10 @@ def check_overall(spec: dict, relevant: list) -> None:
         or spec.get("overall_height_reference", "")
     ).lower()
     if height_reference == "ground":
-        ground_mm = float(scope.get("ground_z_mm", spec.get("overall_ground_z_mm",
-                          spec.get("ground_z_mm", 0.0))))
+        ground_value = scope.get("ground_z_mm")
+        if ground_value is None:
+            ground_value = spec.get("overall_ground_z_mm", spec.get("ground_z_mm", 0.0))
+        ground_mm = float(ground_value or 0.0)
         actual["height_mm"] = bound[1].z * 1000.0 - ground_mm
     info.append({"code": "ACTUAL_OVERALL", "actual": actual,
                  "height_reference": height_reference or "bounds"})
@@ -225,8 +264,10 @@ def check_overall(spec: dict, relevant: list) -> None:
         if abs(difference) > tolerance:
             bucket = errors if status == "confirmed" else warnings
             issue(bucket, "OVERALL_DIMENSION_MISMATCH", f"总体尺寸 {key} 超出允许误差", **record)
-    max_expected = max((float(value.get("value", 0)) for value in overall.values()
-                        if isinstance(value, dict)), default=0)
+    max_expected = max((float(value["value"]) for value in overall.values()
+                        if isinstance(value, dict)
+                        and isinstance(value.get("value"), (int, float))
+                        and not isinstance(value.get("value"), bool)), default=0)
     if max_expected:
         for obj in scoped:
             bound_obj = object_bounds(obj)
@@ -238,7 +279,9 @@ def check_overall(spec: dict, relevant: list) -> None:
 def check_counts(spec: dict, relevant: list) -> None:
     actual = defaultdict(set)
     for obj in relevant:
-        actual[str(obj.get("component_type", ""))].add(str(obj.get("component_id", "")))
+        component_id = str(obj.get("component_id", ""))
+        for component_type in object_component_types(obj):
+            actual[component_type].add(component_id)
     expected_counts = spec.get("expected_counts", {})
     if not isinstance(expected_counts, dict):
         issue(errors, "INVALID_EXPECTED_COUNTS", "expected_counts 必须是对象")
@@ -267,7 +310,7 @@ def check_counts(spec: dict, relevant: list) -> None:
 
 
 def check_required_features(spec: dict, relevant: list) -> None:
-    actual_types = {str(obj.get("component_type", "")) for obj in relevant}
+    actual_types = set().union(*(object_component_types(obj) for obj in relevant)) if relevant else set()
     for feature in spec.get("required_features", []):
         if not isinstance(feature, dict) or not feature.get("required"):
             continue
@@ -286,7 +329,12 @@ def overlap_amount(a, b, axis: int) -> float:
 def check_spatial(spec: dict) -> None:
     components = component_objects()
     bounds = {key: union_bounds(value) for key, value in components.items()}
-    ground = float(spec.get("ground_z_mm", 0.0))
+    overall = spec.get("overall", {}) if isinstance(spec.get("overall"), dict) else {}
+    scope = overall.get("scope", {}) if isinstance(overall.get("scope"), dict) else {}
+    ground_value = scope.get("ground_z_mm")
+    if ground_value is None:
+        ground_value = spec.get("ground_z_mm", 0.0)
+    ground = float(ground_value or 0.0)
     for rule in spec.get("spatial_rules", []):
         if not isinstance(rule, dict):
             continue
@@ -343,16 +391,123 @@ def check_spatial(spec: dict) -> None:
                       overlap_mm=[value * 1000.0 for value in overlaps], rule=rule)
 
 
-try:
-    spec = parse_spec()
-    relevant_objects = check_metadata()
-    check_overall(spec, relevant_objects)
-    check_counts(spec, relevant_objects)
-    check_required_features(spec, relevant_objects)
-    check_spatial(spec)
-except Exception as exc:
-    issue(errors, "VALIDATOR_INTERNAL_ERROR", "验证器内部异常，已转换为报告而不是中断",
-          exception_type=type(exc).__name__, error=str(exc))
+def aabb_gap(a, b) -> float:
+    """Return the shortest separation between two world-space AABBs in metres."""
+    gaps = [max(a[0][axis] - b[1][axis], b[0][axis] - a[1][axis], 0.0)
+            for axis in range(3)]
+    return math.sqrt(sum(value * value for value in gaps))
+
+
+def check_obvious_structure(relevant: list) -> None:
+    """Conservative checks for visibly broken geometry without guessing design intent."""
+    bounded = [(obj, object_bounds(obj)) for obj in relevant]
+    bounded = [(obj, bound) for obj, bound in bounded if bound is not None]
+
+    signatures: dict[tuple, list] = defaultdict(list)
+    for obj, bound in bounded:
+        signature = tuple(round(value * 1000.0, 2) for point in bound for value in point)
+        signatures[signature].append(obj)
+    for objects in signatures.values():
+        if len(objects) < 2:
+            continue
+        types = set().union(*(object_component_types(obj) for obj in objects))
+        component_ids = {str(obj.get("component_id", "")) for obj in objects}
+        if len(component_ids) < 2:
+            continue
+        bucket = errors if len(types) == 1 else warnings
+        issue(bucket, "COINCIDENT_GEOMETRY", "多个独立构件占用完全相同的空间，疑似重复或穿插",
+              objects=[obj.name for obj in objects], component_ids=sorted(component_ids),
+              component_types=sorted(types))
+
+    if len(bounded) < 2:
+        return
+    scene_bound = union_bounds([obj for obj, _ in bounded])
+    if scene_bound is None:
+        return
+    scene_diagonal = math.sqrt(sum((scene_bound[1][axis] - scene_bound[0][axis]) ** 2
+                                   for axis in range(3)))
+    contact_gap = max(0.05, scene_diagonal * 0.01)
+    neighbours: dict[str, set[str]] = {obj.name: set() for obj, _ in bounded}
+    for index, (left_obj, left_bound) in enumerate(bounded):
+        for right_obj, right_bound in bounded[index + 1:]:
+            if aabb_gap(left_bound, right_bound) <= contact_gap:
+                neighbours[left_obj.name].add(right_obj.name)
+                neighbours[right_obj.name].add(left_obj.name)
+    isolated = [name for name, links in neighbours.items() if not links]
+    if isolated:
+        issue(warnings, "ISOLATED_COMPONENTS", "部分工程对象与其他构件距离明显，需结合验证视图确认是否悬空",
+              objects=isolated, contact_gap_mm=contact_gap * 1000.0)
+
+
+def collect_component_evidence(relevant: list) -> None:
+    """Expose real scene metadata to requirement validation without trusting the generator's prose."""
+    grouped: dict[str, list] = defaultdict(list)
+    for obj in relevant:
+        component_id = str(obj.get("component_id", "")).strip() or f"object:{obj.name}"
+        grouped[component_id].append(obj)
+    records = []
+    for component_id, objects in sorted(grouped.items()):
+        bound = union_bounds(objects)
+        dimensions = dims_mm(bound) if bound else None
+        center_mm = ([((bound[0][axis] + bound[1][axis]) * 0.5) * 1000.0 for axis in range(3)]
+                     if bound else None)
+        material_names = sorted({slot.material.name for obj in objects for slot in obj.material_slots
+                                 if slot.material is not None})
+        properties: dict[str, list] = defaultdict(list)
+        ignored_keys = {"_RNA_UI", "quote_relevant", "exclude_from_quote",
+                        "component_id", "instance_id", "component_type"}
+        for obj in objects:
+            for key in obj.keys():
+                if key in ignored_keys:
+                    continue
+                value = obj.get(key)
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    text = value
+                else:
+                    text = str(value)
+                if text not in properties[key]:
+                    properties[key].append(text)
+        records.append({
+            "component_id": component_id,
+            "component_types": sorted(set().union(*(object_component_types(obj) for obj in objects))),
+            "object_count": len(objects),
+            "objects": [obj.name for obj in objects[:20]],
+            "dimensions_mm": dimensions,
+            "center_mm": center_mm,
+            "materials": material_names,
+            "properties": dict(properties),
+        })
+    info.append({"code": "COMPONENT_EVIDENCE", "components": records})
+
+
+checks: list[dict] = []
+
+
+def run_check(name: str, function, *args):
+    before_errors = len(errors)
+    before_warnings = len(warnings)
+    try:
+        value = function(*args)
+        checks.append({"name": name, "status": "completed",
+                       "new_errors": len(errors) - before_errors,
+                       "new_warnings": len(warnings) - before_warnings})
+        return value
+    except Exception as exc:
+        issue(errors, "VALIDATOR_INTERNAL_ERROR", f"验证阶段 {name} 发生内部异常；其他阶段继续执行",
+              phase=name, exception_type=type(exc).__name__, error=str(exc),
+              traceback=traceback.format_exc())
+        checks.append({"name": name, "status": "crashed", "error": str(exc)})
+        return None
+
+
+spec = run_check("parse_spec", parse_spec) or {}
+relevant_objects = run_check("metadata", check_metadata) or []
+run_check("overall_dimensions", check_overall, spec, relevant_objects)
+run_check("component_counts", check_counts, spec, relevant_objects)
+run_check("required_features", check_required_features, spec, relevant_objects)
+run_check("declared_spatial_rules", check_spatial, spec)
+run_check("obvious_structure", check_obvious_structure, relevant_objects)
+run_check("component_evidence", collect_component_evidence, relevant_objects)
 
 report = {
     "schema": 1,
@@ -363,6 +518,7 @@ report = {
     "errors": errors,
     "warnings": warnings,
     "info": info,
+    "checks": checks,
 }
 REPORT.parent.mkdir(parents=True, exist_ok=True)
 REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

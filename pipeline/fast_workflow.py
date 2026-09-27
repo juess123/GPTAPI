@@ -44,17 +44,28 @@ def main():
             "--dependencies", str(dependencies), "--task-packages", str(task_packages)]):
         return 1
     build_cmd = [sys.executable, str(HERE / "build.py"), "--gen-dir", str(gen_dir),
-                 "--out-dir", str(out_root), "--task-packages-dir", str(task_packages)]
+                 "--out-dir", str(out_root), "--task-packages-dir", str(task_packages),
+                 "--input-dir", str(Path(args.input_dir).resolve())]
     blend_repairs = 0
     xlsx_repairs = 0
+    xlsx_only_run: Path | None = None
     while True:
         if run([sys.executable, str(HERE / "validate_model_spec.py"),
                 "--spec", str(model_spec)]):
             print("[错误] model_spec.json 锁校验失败，拒绝继续生成或修复", file=sys.stderr)
             return 1
-        current_build_cmd = list(build_cmd)
-        if blend_repairs >= 2:
-            current_build_cmd.append("--allow-validation-failure")
+        if xlsx_only_run is not None:
+            current_build_cmd = [
+                sys.executable, str(HERE / "run_xlsx_stage.py"),
+                "--gen-dir", str(gen_dir), "--run-dir", str(xlsx_only_run),
+                "--task-packages-dir", str(task_packages),
+            ]
+        else:
+            current_build_cmd = list(build_cmd)
+            if blend_repairs:
+                current_build_cmd.append("--skip-optional-renders")
+            if blend_repairs >= 2:
+                current_build_cmd.append("--allow-validation-failure")
         if run(current_build_cmd) == 0:
             break
         runs = sorted((path for path in out_root.iterdir() if path.is_dir()),
@@ -82,6 +93,7 @@ def main():
                     "--input-dir", args.input_dir, "--gen-dir", str(gen_dir),
                     "--report", str(numbered_report), "--attempt", str(xlsx_repairs)]):
                 return 1
+            xlsx_only_run = runs[0]
             continue
 
         if blend_repairs >= 2:
@@ -97,6 +109,7 @@ def main():
                 "--input-dir", args.input_dir, "--gen-dir", str(gen_dir),
                 "--report", str(numbered_report), "--attempt", str(blend_repairs)]):
             return 1
+        xlsx_only_run = None
     runs = sorted((path for path in out_root.iterdir() if path.is_dir()),
                   key=lambda path: path.stat().st_mtime, reverse=True)
     if not runs:

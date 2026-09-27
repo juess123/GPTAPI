@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -56,8 +57,14 @@ MAX_IMAGE_BYTES = 4 * 1024 * 1024
 
 # 默认值；可被 .env 或命令行覆盖
 DEFAULT_TIMEOUT = 180          # 单次请求超时（秒）
-DEFAULT_MAX_TOKENS = 16000     # 复杂脚本代码较长
+DEFAULT_MAX_TOKENS = 320000    # 可由 .env 或命令行覆盖
 DEFAULT_ATTEMPTS = 4
+
+# This gateway is reached by a public IP but must not pass through the user's
+# Windows system proxy (currently 127.0.0.1:7890). The proxy intermittently
+# resets multi-megabyte multimodal requests, while the gateway accepts them
+# directly. Keep the bypass narrowly scoped so all other traffic is unchanged.
+DIRECT_GATEWAY_HOSTS = {"8.216.45.190"}
 
 INSTRUCTION = """\
 根据任务材料生成两个可直接执行的 Python 脚本和一份依赖声明。只输出指定格式，不要解释。
@@ -109,6 +116,15 @@ DEPENDENCIES 中声明，由执行系统安装到本任务的独立环境。允�
 18. spatial_rules 可使用：inside_host、near_host、floor_contact、left_of、right_of、above、below、no_overlap。
     规则中的对象用 component_id 引用，并提供必要的 axis、axes、tolerance_mm 或 max_gap_mm。
     只声明能由任务材料确认的关系；不确定关系写入场景 assumptions_json，不得编造为硬约束。
+19. 锁定标准中的 source_requirements 是经过精简的 Blender 验收清单。make_blend.py 必须逐条实现其中
+    level=hard 且 status=confirmed/derived 的规则；src 仅用于追溯文字编号，不得擅自删除或降级规则。
+20. 锁定标准中的 visual_criteria 是参考图外观标准。模型首先保证整体轮廓、主要构件、数量、布局、
+    相对位置、比例、开口和曲直形态与参考图一致；灯光、阴影、摄影棚和相机角度不属于硬性外观标准。
+21. 工程对象应按锁定标准设置稳定的 component_id/component_type，并可用自定义属性 requirement_ids
+    （JSON数组字符串）记录其实现的 REQ 编号，便于外部验证器定位；该属性不能代替真实几何实现。
+22. 所有可选的高质量预览、摄影棚渲染和附属效果图必须受环境变量 PIPELINE_SKIP_OPTIONAL_RENDERS 控制：
+    当其值为 "1" 时跳过这些耗时渲染，但仍须完整创建几何、材质、集合、相机、灯光、共享数据并保存
+    final_model.blend。内部构建、保存和清单输出不得因该开关省略。
 
 ==================== 输出格式（必须严格照此，不得增减）====================
 <<<DEPENDENCIES>>>
@@ -211,15 +227,15 @@ def xlsx_to_text(path: Path) -> str:
     return "\n".join(parts).rstrip() or "（空工作簿）"
 
 
-def image_data_url(path: Path) -> tuple[str | None, str]:
-    """生成模型可接收的图片；大图自动转成小于上限的 JPEG 内存副本。"""
+def image_data_url(path: Path, max_dimension: int | None = None) -> tuple[str | None, str]:
+    """生成模型可接收的图片；可限制验收副本尺寸，绝不修改原文件。"""
     data = path.read_bytes()
     if not data:
         return None, "空文件"
     mime = (mimetypes.guess_type(path.name)[0] or "").lower()
     if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"):
         mime = "image/png"
-    if len(data) <= MAX_IMAGE_BYTES:
+    if len(data) <= MAX_IMAGE_BYTES and max_dimension is None:
         return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}", "原图"
 
     try:
@@ -233,6 +249,16 @@ def image_data_url(path: Path) -> tuple[str | None, str]:
             background.paste(image, mask=image.getchannel("A"))
             image = background
 
+        resized_for_review = False
+        if max_dimension and max(image.size) > max_dimension:
+            scale = max_dimension / max(image.size)
+            target = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+            resampling = getattr(Image, "Resampling", Image).LANCZOS
+            image = image.resize(target, resampling)
+            resized_for_review = True
+        elif max_dimension and len(data) <= MAX_IMAGE_BYTES:
+            return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}", "原图"
+
         # 先保留分辨率降低 JPEG 质量；仍超限时再逐步缩小尺寸。
         quality = 90
         while True:
@@ -242,7 +268,8 @@ def image_data_url(path: Path) -> tuple[str | None, str]:
             if len(optimized) <= MAX_IMAGE_BYTES:
                 width, height = image.size
                 url = "data:image/jpeg;base64," + base64.b64encode(optimized).decode("ascii")
-                return url, f"自动优化为 JPEG {width}×{height}，{len(optimized)} 字节"
+                prefix = "验收副本" if resized_for_review else "自动优化"
+                return url, f"{prefix} JPEG {width}×{height}，{len(optimized)} 字节"
             if quality > 55:
                 quality -= 10
                 continue
@@ -376,6 +403,13 @@ class Heartbeat:
         return False
 
 
+def should_bypass_system_proxy(url: str) -> bool:
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").casefold() in DIRECT_GATEWAY_HOSTS
+    except ValueError:
+        return False
+
+
 def post_json(url: str, payload: dict, api_key: str,
               timeout: int = DEFAULT_TIMEOUT, max_attempts: int = DEFAULT_ATTEMPTS) -> dict:
     """
@@ -390,6 +424,11 @@ def post_json(url: str, payload: dict, api_key: str,
     """
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     last_err = None
+    bypass_proxy = should_bypass_system_proxy(url)
+    opener = (urllib.request.build_opener(urllib.request.ProxyHandler({}))
+              if bypass_proxy else None)
+    if bypass_proxy:
+        print("  网络路径: 直连 8.216.45.190（已绕过系统代理）", flush=True)
 
     for attempt in range(1, max_attempts + 1):
         req = urllib.request.Request(url, data=body, method="POST")
@@ -401,7 +440,8 @@ def post_json(url: str, payload: dict, api_key: str,
 
         try:
             with Heartbeat(label, timeout):
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                open_request = opener.open if opener is not None else urllib.request.urlopen
+                with open_request(req, timeout=timeout) as resp:
                     raw = resp.read()
 
             took = time.time() - attempt_t0
@@ -587,10 +627,13 @@ def main(argv: list[str] | None = None) -> int:
 ================================================================
 以上 model_spec.json 在建模前已由输入材料提取并锁定，是 Blender 与 Excel 的共同标准：
 1. 两个脚本必须遵守其中 confirmed 和 derived 的尺寸、数量、必备功能及报价要求。
-2. 不得重新解释标准，不得把 required=true 改为 false，不得把必备构件数量改成0。
+2. 不得重新解释标准，不得把 level=hard 降为advisory，不得把必备构件数量改成0。
 3. make_blend.py 中的 validation_spec_json 只能复制这份标准的相关字段，不得另造较宽松标准。
 4. component_type 必须与 expected_counts 的键完全一致，以便外部验证器独立计数。
 5. make_xlsx.py 必须覆盖 quote_requirements 中 required=true 的项目，并与 Blender 构件数量保持一致。
+6. source_requirements 中 level=hard 且 status=confirmed/derived 的模型规则必须逐项落实；
+   visual_criteria 中 level=hard 的轮廓、布局、比例、构件和开口特征必须优先保证。
+7. 灯光、摄影棚、渲染艺术效果和相机角度只作辅助，不能牺牲模型本体与参考图、提示词的符合度。
 """
 
     # 多模态 content：文字在前，图片在后并带一句引导

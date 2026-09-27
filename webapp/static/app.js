@@ -18,6 +18,13 @@
     upload:     $("uploadCard"),
     prompt:     $("userPrompt"),
     promptCount: $("promptCount"),
+    preview:    $("imagePreview"),
+    previewImage: $("previewImage"),
+    previewName: $("previewName"),
+    previewMeta: $("previewMeta"),
+    previewClose: $("previewClose"),
+    previewPrev: $("previewPrev"),
+    previewNext: $("previewNext"),
 
     progCard:   $("progressCard"),
     stageLabel: $("stageLabel"),
@@ -50,6 +57,7 @@
   let es = null;
   let timer = null;
   let t0 = 0;
+  let previewItem = null;
 
   // ── 阶段文案 ──────────────────────────────────────────────
   const STAGE_TEXT = {
@@ -110,6 +118,105 @@
   const BADGE = { image: "IMG", xlsx: "XLS", text: "MD" };
   const KIND_CN = { image: "图片", xlsx: "价格表", text: "规格文本" };
 
+  const previewUrl = (item) => {
+    if (!item.previewUrl) item.previewUrl = URL.createObjectURL(item.file);
+    return item.previewUrl;
+  };
+
+  async function makeThumbnail(item) {
+    if (item.thumbUrl) return item.thumbUrl;
+    if (item.thumbPromise) return item.thumbPromise;
+    item.thumbPromise = (async () => {
+      if (!("createImageBitmap" in window)) return previewUrl(item);
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(item.file, {
+          resizeWidth: 96,
+          resizeQuality: "low",
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        canvas.getContext("2d").drawImage(bitmap, 0, 0);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.68));
+        if (!blob) return item.released ? "" : previewUrl(item);
+        const url = URL.createObjectURL(blob);
+        if (item.released) {
+          URL.revokeObjectURL(url);
+          return "";
+        }
+        item.thumbUrl = url;
+        return item.thumbUrl;
+      } catch (_) {
+        return item.released ? "" : previewUrl(item);
+      } finally {
+        bitmap?.close?.();
+      }
+    })();
+    return item.thumbPromise;
+  }
+
+  function releaseItem(item) {
+    item.released = true;
+    if (item?.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    if (item?.thumbUrl && item.thumbUrl !== item.previewUrl) URL.revokeObjectURL(item.thumbUrl);
+    item.previewUrl = null;
+    item.thumbUrl = null;
+  }
+
+  function releasePicked() {
+    picked.forEach(releaseItem);
+  }
+
+  function imageItems() {
+    return picked.filter((item) => kindOf(item.name) === "image");
+  }
+
+  function showPreview(item) {
+    if (!item || kindOf(item.name) !== "image") return;
+    previewItem = item;
+    const images = imageItems();
+    const index = images.indexOf(item);
+    el.previewImage.src = previewUrl(item);
+    el.previewImage.alt = item.name;
+    el.previewName.textContent = item.name;
+    el.previewMeta.textContent = `${index + 1} / ${images.length}　·　${fmtSize(item.size)}`;
+    const multiple = images.length > 1;
+    el.previewPrev.hidden = !multiple;
+    el.previewNext.hidden = !multiple;
+    el.preview.hidden = false;
+    document.body.classList.add("preview-open");
+    el.previewClose.focus({ preventScroll: true });
+  }
+
+  function closePreview() {
+    if (el.preview.hidden) return;
+    el.preview.hidden = true;
+    el.previewImage.removeAttribute("src");
+    document.body.classList.remove("preview-open");
+    previewItem = null;
+  }
+
+  function movePreview(step) {
+    const images = imageItems();
+    if (!images.length) return closePreview();
+    const current = Math.max(0, images.indexOf(previewItem));
+    showPreview(images[(current + step + images.length) % images.length]);
+  }
+
+  el.previewClose.onclick = closePreview;
+  el.previewPrev.onclick = () => movePreview(-1);
+  el.previewNext.onclick = () => movePreview(1);
+  el.preview.addEventListener("click", (event) => {
+    if (event.target === el.preview) closePreview();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (el.preview.hidden) return;
+    if (event.key === "Escape") closePreview();
+    if (event.key === "ArrowLeft") movePreview(-1);
+    if (event.key === "ArrowRight") movePreview(1);
+  });
+
   // ── 文件列表渲染 ──────────────────────────────────────────
 
   function renderFiles() {
@@ -120,9 +227,25 @@
       const li = document.createElement("li");
       const kb = kindOf(p.name);
 
-      const badge = document.createElement("span");
-      badge.className = "badge " + kb;
-      badge.textContent = BADGE[kb];
+      let badge;
+      if (kb === "image") {
+        badge = document.createElement("button");
+        badge.className = "file-thumb";
+        badge.type = "button";
+        badge.title = `预览 ${p.name}`;
+        badge.setAttribute("aria-label", `预览图片 ${p.name}`);
+        const img = document.createElement("img");
+        img.alt = "";
+        badge.append(img);
+        badge.onclick = () => showPreview(p);
+        makeThumbnail(p).then((url) => {
+          if (url && img.isConnected && picked.includes(p)) img.src = url;
+        });
+      } else {
+        badge = document.createElement("span");
+        badge.className = "badge " + kb;
+        badge.textContent = BADGE[kb];
+      }
 
       const name = document.createElement("span");
       name.className = "f-name";
@@ -137,7 +260,12 @@
       del.type = "button";
       del.textContent = "×";
       del.title = "移除";
-      del.onclick = () => { picked.splice(i, 1); renderFiles(); };
+      del.onclick = () => {
+        if (previewItem === p) closePreview();
+        picked.splice(i, 1);
+        releaseItem(p);
+        renderFiles();
+      };
 
       li.append(badge, name, meta, del);
       el.filelist.append(li);
@@ -188,7 +316,7 @@
         name = `${stem}(${n})${e}`;
       }
       seen.add(name);
-      picked.push({ file: f, name, size: f.size });
+      picked.push({ file: f, name, size: f.size, released: false });
     }
     renderFiles();
   }
@@ -224,7 +352,13 @@
   });
 
   el.prompt.addEventListener("input", renderFiles);
-  el.clear.onclick = () => { picked = []; el.prompt.value = ""; renderFiles(); };
+  el.clear.onclick = () => {
+    closePreview();
+    releasePicked();
+    picked = [];
+    el.prompt.value = "";
+    renderFiles();
+  };
 
   // 整页拖放也要接住，避免浏览器直接打开文件
   ["dragover", "drop"].forEach((ev) =>
@@ -463,6 +597,8 @@
     el.logBody.textContent = "";
     el.upload.hidden = false;
     el.pasteToast.hidden = true;
+    closePreview();
+    releasePicked();
     picked = [];
     el.prompt.value = "";
     renderFiles();
@@ -519,6 +655,8 @@
   function beginJob(data) {
     // 不把上传卡片藏起来：并发上限是 2，同一个页面可以连着排几个任务，
     // 多出来的在服务端排队。所以提交完只是清空选择区，让它立刻能接下一批。
+    closePreview();
+    releasePicked();
     picked = [];
     rejectedByClient = [];
     el.prompt.value = "";
@@ -534,6 +672,8 @@
 
     refreshHistory();
   }
+
+  window.addEventListener("beforeunload", releasePicked);
 
   // 把进度面板切到某个任务上：新提交的，或从历史里点开的排队中 / 运行中的任务
   function focusJob(job) {
