@@ -4,6 +4,15 @@ from __future__ import annotations
 import json
 
 
+class EmptyRepairPlan(ValueError):
+    """The response was well-formed but asked for no change at all.
+
+    This is a semantic answer from the model ("there is nothing here worth patching"),
+    not a broken response shape.  Callers must not report it as a format error and
+    re-ask the same question, or a deliberate no-op is retried until the job dies.
+    """
+
+
 def parse_repair_plan(text: str) -> list[dict[str, str]]:
     text = text.strip()
     if text.startswith("```"):
@@ -14,8 +23,10 @@ def parse_repair_plan(text: str) -> list[dict[str, str]]:
         raise ValueError("响应中没有JSON补丁对象")
     payload = json.loads(text[start:end + 1])
     replacements = payload.get("replacements") if isinstance(payload, dict) else None
-    if not isinstance(replacements, list) or not replacements:
+    if not isinstance(replacements, list):
         raise ValueError("replacements必须是非空数组")
+    if not replacements:
+        raise EmptyRepairPlan("replacements是空数组（模型认为无需修改）")
     if len(replacements) > 20:
         raise ValueError("单次局部修复最多20处替换")
     result = []

@@ -15,6 +15,17 @@ def run(cmd):
     print("$ " + " ".join(f'\"{part}\"' if " " in part else part for part in cmd), flush=True)
     return subprocess.run(cmd, cwd=ROOT).returncode
 
+
+def newest_buildable_run(out_root: Path) -> Path | None:
+    """Return the newest run whose Blender stage completed successfully."""
+    candidates = [
+        path for path in out_root.iterdir()
+        if path.is_dir()
+        and (path / "final_model.blend").is_file()
+        and (path / "model_quantities.json").is_file()
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", required=True)
@@ -71,10 +82,11 @@ def main():
         runs = sorted((path for path in out_root.iterdir() if path.is_dir()),
                       key=lambda path: path.stat().st_mtime, reverse=True)
         report = None
-        if runs:
-            validation = runs[0] / "validation_report.json"
-            runtime_failure = runs[0] / "build_failure.json"
-            xlsx_failure = runs[0] / "xlsx_failure.json"
+        report_run = xlsx_only_run if xlsx_only_run is not None else (runs[0] if runs else None)
+        if report_run is not None:
+            validation = report_run / "validation_report.json"
+            runtime_failure = report_run / "build_failure.json"
+            xlsx_failure = report_run / "xlsx_failure.json"
             report = (runtime_failure if runtime_failure.is_file() else
                       xlsx_failure if xlsx_failure.is_file() else
                       validation if validation.is_file() else None)
@@ -93,11 +105,21 @@ def main():
                     "--input-dir", args.input_dir, "--gen-dir", str(gen_dir),
                     "--report", str(numbered_report), "--attempt", str(xlsx_repairs)]):
                 return 1
-            xlsx_only_run = runs[0]
+            xlsx_only_run = report_run
             continue
 
         if blend_repairs >= 2:
-            print("[错误] Blender自动修复已达到2次上限", file=sys.stderr)
+            fallback_run = newest_buildable_run(out_root)
+            if report.name == "build_failure.json" and fallback_run is not None:
+                print(
+                    "[警告] Blender自动修复已达到2次上限，且最后一次修复导致运行错误；"
+                    f"回退到最近可运行版本：{fallback_run}",
+                    flush=True,
+                )
+                print("[继续] 使用该版本的模型实体与数量数据生成Excel", flush=True)
+                xlsx_only_run = fallback_run
+                continue
+            print("[错误] Blender自动修复已达到2次上限，且没有可回退的成功模型", file=sys.stderr)
             return 1
         blend_repairs += 1
         report_kind = "validation" if report.name == "validation_report.json" else "runtime-failure"
@@ -110,10 +132,16 @@ def main():
                 "--report", str(numbered_report), "--attempt", str(blend_repairs)]):
             return 1
         xlsx_only_run = None
-    runs = sorted((path for path in out_root.iterdir() if path.is_dir()),
-                  key=lambda path: path.stat().st_mtime, reverse=True)
+    runs = sorted(
+        (path for path in out_root.iterdir()
+         if path.is_dir()
+         and (path / "final_model.blend").is_file()
+         and (path / "final_quote.xlsx").is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
     if not runs:
-        print("[错误] build.py 未生成输出目录", file=sys.stderr)
+        print("[错误] 流程结束但没有同时包含Blend与Excel的完整输出目录", file=sys.stderr)
         return 1
     (out_root / "LATEST_RUN.txt").write_text(str(runs[0]), encoding="utf-8")
     print(f"FAST_WORKFLOW_OK {runs[0]}")

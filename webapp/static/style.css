@@ -841,15 +841,27 @@ body.preview-open { overflow: hidden; }
 .dl:hover .dl-btn { background: var(--accent-hover); }
 .dl:active .dl-btn { transform: scale(.95); }
 
-.extras {
+/* 本次输入文件：默认只显示数量，鼠标悬停（原生 title）才展开完整清单 */
+.input-line {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--text-3);
+  word-break: break-word;
+}
+.input-line .count {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+  text-underline-offset: 3px;
+}
+/* 结果卡片里独立成行：与上方下载区用细线分隔 */
+.input-line.block {
   margin-top: 16px;
-  padding-top: 16px;
+  padding-top: 14px;
   border-top: 1px solid var(--line-soft);
   font-size: 13px;
   color: var(--text-2);
 }
-.extras a { color: var(--accent); text-decoration: none; margin-right: 12px; }
-.extras a:hover { text-decoration: underline; }
 
 /* ── 失败 ──────────────────────────────────────────────────── */
 

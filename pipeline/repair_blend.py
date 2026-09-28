@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import ask_model
-from local_repair_utils import apply_replacements, parse_repair_plan
+from local_repair_utils import EmptyRepairPlan, apply_replacements, parse_repair_plan
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -190,9 +190,13 @@ def main() -> int:
                    .replace("{script}", script).replace("{materials}", source_excerpt)
     prompt += """
 
-本次补丁只能修复报告中的最终模型实体缺陷。禁止为了补齐集合树、元数据、
-语义标签、工艺路径颜色、隐藏节点证明、验证清单或其他报告证据而修改模型。
-如果某条问题不需要改变实际几何、位置、材质或可见内容，不得为它生成补丁。
+本次补丁只能修复报告中的最终模型实体缺陷，不得为了让报告变好看而改动模型：
+禁止为了补齐集合树、隐藏节点证明、验证清单或其他报告证据而修改模型。
+但有一条例外：如果某条致命错误是构件数量或必备构件缺失，而该构件确实已在场景中
+建成（网格/曲线/字体或其子件存在），只是 component_type / component_id 写在
+非几何父级总成（EMPTY）上、或仅写在子件上，那么修正标签归属属于合法修复，允许生成补丁。
+如果某条问题确实不需要改变实际几何、位置、材质或可见内容，就不要为它单独生成补丁，
+但仍必须为上面列出的致命错误给出补丁，不得返回空数组。
 """
     content = [{"type": "text", "text": prompt}]
     print(f"Blender修复文本长度: {len(prompt)} 字符（仅含致命错误）", flush=True)
@@ -223,9 +227,18 @@ def main() -> int:
     updated = None
     replacements = None
     last_error = ""
-    # Invalid JSON/empty replacements are response-format failures, not failed
-    # Blender repair attempts.  Correct the response inside this same attempt.
+    empty_plan = False
+    fatal_errors = [item for item in report_data.get("errors", []) if isinstance(item, dict)]
+    fatal_brief = "；".join(
+        f"{item.get('code')}({item.get('component_type') or item.get('feature_id') or '-'})"
+        for item in fatal_errors[:8])
+    # Invalid JSON is a response-format failure, not a failed Blender repair attempt,
+    # so it is corrected inside this same attempt.  An explicit empty array is a
+    # different outcome (the model judged nothing needs changing) and repeating the
+    # same question at it only wastes requests, so it gets a single, different nudge.
     content_attempts = 4
+    empty_attempts = 2
+    empty_tries = 0
     for content_attempt in range(1, content_attempts + 1):
         result = ask_model.post_json(
             env["CNXMAI_CHAT_URL"],
@@ -234,10 +247,30 @@ def main() -> int:
             env["CNXMAI_API_KEY"], timeout=timeout, max_attempts=attempts,
         )
         response = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        # Persist every response as it arrives: a run that exhausts its retries used to
+        # leave only the last one, so a systematic refusal was undiagnosable afterwards.
+        (gen_dir / f"raw_repair_response_{args.attempt}_{content_attempt}.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             replacements = parse_repair_plan(response)
             updated = apply_replacements(script, replacements)
             break
+        except EmptyRepairPlan as exc:
+            empty_tries += 1
+            last_error = str(exc)
+            empty_plan = True
+            print(f"局部补丁为空（模型认为无需修改 {empty_tries}/{empty_attempts}）：{last_error}",
+                  flush=True)
+            if empty_tries >= empty_attempts:
+                break
+            content[0]["text"] += (
+                f"\n上一响应是空补丁：{last_error}。但本轮致命错误共 {len(fatal_errors)} 项："
+                f"{fatal_brief}。它们是外部验证器的硬性要求，空数组会被直接判为失败："
+                "必须针对上述错误给出至少一处 replacement。"
+                "若某条错误只是 component_type/component_id 的归属问题（构件确实已建成，"
+                "标签却写在了非几何父级总成上，或只写在子件上），修正标签归属属于合法修复。"
+                "请重新输出最小且 old 唯一匹配的JSON补丁。"
+            )
         except (ValueError, json.JSONDecodeError, SyntaxError) as exc:
             last_error = str(exc)
             print(f"局部补丁无效（格式纠正 {content_attempt}/{content_attempts}）：{last_error}", flush=True)
@@ -250,7 +283,12 @@ def main() -> int:
     (gen_dir / f"raw_repair_response_{args.attempt}.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     if updated is None or replacements is None:
-        print(f"[错误] 无法生成可安全应用的局部补丁：{last_error}", file=sys.stderr)
+        if empty_plan:
+            detail = (f"模型连续 {empty_tries} 次返回空补丁，认为无需修改；"
+                      f"但本轮 {len(fatal_errors)} 项致命错误仍需处理：{fatal_brief}")
+        else:
+            detail = last_error
+        print(f"[错误] 无法生成可安全应用的局部补丁：{detail}", file=sys.stderr)
         return 1
     archive = gen_dir / f"make_blend.attempt-{args.attempt}.py"
     archive.write_text(script, encoding="utf-8")

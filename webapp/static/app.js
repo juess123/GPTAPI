@@ -33,6 +33,7 @@
     bar:        $("bar"),
     barFill:    $("barFill"),
     progNotice: $("progNotice"),
+    progInputs: $("progInputs"),
     elapsed:    $("elapsed"),
     toggleLog:  $("toggleLog"),
     console:    $("console"),
@@ -41,7 +42,7 @@
     resCard:    $("resultCard"),
     resSub:     $("resultSub"),
     dlGrid:     $("dlGrid"),
-    extras:     $("extras"),
+    resInputs:  $("resInputs"),
 
     failCard:   $("failCard"),
     failMsg:    $("failMsg"),
@@ -54,6 +55,7 @@
   let rejectedByClient = [];
   let picked = [];             // { file, name, size, kind }
   let currentJob = null;
+  let currentInputs = [];      // 本次任务的投料清单（来自服务端 inputs）
   let es = null;
   let timer = null;
   let t0 = 0;
@@ -117,6 +119,38 @@
 
   const BADGE = { image: "IMG", xlsx: "XLS", text: "MD" };
   const KIND_CN = { image: "图片", xlsx: "价格表", text: "规格文本" };
+
+  // 本次输入文件：默认只显示数量，鼠标悬停（原生 title）才展开完整清单。
+  // inputs 由服务端给出（提交响应 / 任务快照 / 结束事件都有），老任务没有就整行隐藏。
+  function showInputs(node, inputs) {
+    if (!node) return;
+    const list = (Array.isArray(inputs) ? inputs : []).filter((f) => f && f.name);
+    if (!list.length) {
+      node.hidden = true;
+      node.textContent = "";
+      node.removeAttribute("title");
+      return;
+    }
+    const total = list.reduce((sum, f) => sum + (f.size || 0), 0);
+    const lines = list.map((f) =>
+      `· ${f.name}　${KIND_CN[f.kind] || "文件"}　${fmtSize(f.size || 0)}`);
+
+    node.textContent = "本次输入：";
+    const count = document.createElement("span");
+    count.className = "count";
+    count.textContent = `${list.length} 个文件 · ${fmtSize(total)}`;
+    count.title = `本次输入文件：\n${lines.join("\n")}`;
+    node.append(count);
+    node.hidden = false;
+  }
+
+  // 记住本次任务的投料，供进度/结果两处共用
+  function rememberInputs(job) {
+    if (job && Array.isArray(job.inputs) && job.inputs.length) {
+      currentInputs = job.inputs;
+    }
+    return currentInputs;
+  }
 
   const previewUrl = (item) => {
     if (!item.previewUrl) item.previewUrl = URL.createObjectURL(item.file);
@@ -494,9 +528,9 @@
     const secs = job.elapsed ?? (Date.now() - t0) / 1000;
     el.resSub.textContent = jobSpan(job, secs)
       + `　·　耗时 ${fmtClock(secs)}　·　共 ${job.files.length} 个文件`;
+    showInputs(el.resInputs, rememberInputs(job));
 
     const primary = job.files.filter((f) => f.primary);
-    const extras = job.files.filter((f) => !f.primary);
 
     el.dlGrid.innerHTML = "";
     for (const f of primary) {
@@ -531,18 +565,8 @@
       el.dlGrid.append(a);
     }
 
-    if (extras.length) {
-      el.extras.hidden = false;
-      el.extras.innerHTML = "<span>另有附属文件：</span>";
-      for (const f of extras) {
-        const a = document.createElement("a");
-        a.href = `/api/jobs/${job.id}/download/${encodeURIComponent(f.name)}`;
-        a.textContent = `${f.name}（${fmtSize(f.size)}）`;
-        el.extras.append(a);
-      }
-    } else {
-      el.extras.hidden = true;
-    }
+    // 附属文件不在界面上展示：结果卡片只留两个交付物，避免几十个中间文件刷屏。
+    // 文件仍然留在任务目录里，需要时可以直接从 webapp/workspaces/<任务号>/ 取。
 
     // 底部「再次上传」
     let again = el.resCard.querySelector(".again-row");
@@ -588,6 +612,9 @@
     if (es) { es.close(); es = null; }
     stopClock();
     currentJob = null;
+    currentInputs = [];
+    showInputs(el.progInputs, []);
+    showInputs(el.resInputs, []);
     el.progCard.hidden = true;
     el.resCard.hidden = true;
     el.failCard.hidden = true;
@@ -653,7 +680,7 @@
   }
 
   function beginJob(data) {
-    // 不把上传卡片藏起来：并发上限是 2，同一个页面可以连着排几个任务，
+    // 不把上传卡片藏起来：并发上限默认是 5，同一个页面可以连着排几个任务，
     // 多出来的在服务端排队。所以提交完只是清空选择区，让它立刻能接下一批。
     closePreview();
     releasePicked();
@@ -662,6 +689,7 @@
     el.prompt.value = "";
     renderFiles();
 
+    rememberInputs(data);
     focusJob({ id: data.id, stage: "排队中", progress: 4 });
 
     const skipped = data.warnings || [];
@@ -678,6 +706,7 @@
   // 把进度面板切到某个任务上：新提交的，或从历史里点开的排队中 / 运行中的任务
   function focusJob(job) {
     currentJob = job.id;
+    showInputs(el.progInputs, rememberInputs(job));
     el.resCard.hidden = true;
     el.failCard.hidden = true;
     el.progCard.hidden = false;
@@ -702,6 +731,7 @@
       if (d.type === "snapshot") {
         setStage(d.stage);
         setProgress(d.progress);
+        showInputs(el.progInputs, rememberInputs(d));
         if (Array.isArray(d.logs) && d.logs.length) {
           el.logBody.textContent = d.logs.join("\n");
           el.logBody.scrollTop = el.logBody.scrollHeight;

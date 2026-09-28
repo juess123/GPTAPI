@@ -100,10 +100,10 @@ E:\GPTAPI3\.venv\Scripts\python.exe webapp\server.py
 
 几个实际会碰到的前提：
 
-- **并发上限 2**：同时最多 2 个任务在跑，多出来的一律排队，各自的工作目录、脚本、产物互不干扰。
+- **并发上限 5**：同时最多 5 个任务在跑，多出来的一律排队，各自的工作目录、脚本、产物互不干扰。
   想调就设 `WEBAPP_PARALLEL`（1–8）：
   ```powershell
-  $env:WEBAPP_PARALLEL="3"; & $py webapp\server.py
+  $env:WEBAPP_PARALLEL="5"; & $py webapp\server.py
   ```
   再往上加意义不大 —— 任务的绝大部分时间都花在等模型回包上，只有 Blender 生成那一段吃 CPU，
   同时跑太多会互相抢核，反而每个都变慢。

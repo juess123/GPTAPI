@@ -17,7 +17,7 @@ A' 流水线 · Web 后端
     GET  /api/jobs                     历史任务列表
 
 设计取舍：
-  · 固定并发 N 个任务（默认 2，WEBAPP_PARALLEL 可调），共用一个队列。
+  · 固定并发 N 个任务（默认 5，WEBAPP_PARALLEL 可调），共用一个队列。
     多出来的任务在队列里排队，先到先做。每个任务的目录、脚本、产物完全隔离，
     所以并行不会互相踩；但真正跑 Blender 那一段会吃满 CPU —— 所以 N 不宣大。
   · 复用 ask_model.py / build.py 作为子进程，而不是 import，
@@ -88,9 +88,9 @@ def _read_parallel() -> int:
     """
     raw = os.environ.get("WEBAPP_PARALLEL", "").strip()
     try:
-        n = int(raw) if raw else 2
+        n = int(raw) if raw else 5
     except ValueError:
-        n = 2
+        n = 5
     return max(1, min(8, n))
 
 
@@ -228,6 +228,8 @@ class Job:
             progress=self.progress,
             error=self.error,
             files=self.files,
+            # 结果卡片要显示「本次输入」清单，而结束事件是它的最后一个数据来源
+            inputs=self.inputs,
             started=self.started,
             finished=self.finished,
             elapsed=self.elapsed,
@@ -670,7 +672,7 @@ async def lifespan(_app: FastAPI):
                          name=f"worker-{i + 1}").start()
 
     note(f"服务就绪　并发上限 {MAX_PARALLEL}"
-         + (f"　（WEBAPP_PARALLEL={MAX_PARALLEL}）" if MAX_PARALLEL != 2 else ""))
+         + (f"　（WEBAPP_PARALLEL={MAX_PARALLEL}）" if MAX_PARALLEL != 5 else ""))
     yield
 
 

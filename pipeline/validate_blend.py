@@ -92,6 +92,53 @@ def object_component_types(obj) -> set[str]:
     return result
 
 
+GEOMETRY_TYPES = {"MESH", "CURVE", "FONT"}
+
+
+def has_geometry(obj) -> bool:
+    """True when the object itself or one of its descendants is real geometry."""
+    if obj.type in GEOMETRY_TYPES:
+        return True
+    stack = list(obj.children)
+    while stack:
+        child = stack.pop()
+        if child.type in GEOMETRY_TYPES:
+            return True
+        stack.extend(child.children)
+    return False
+
+
+def labelled_components() -> dict[str, set[str]]:
+    """Map component_id to the component types it declares, for real components only.
+
+    A component's identity is not always carried by the meshes themselves: a generated
+    script may put component_type/component_id on an aggregate parent (an EMPTY 总成)
+    whose children are the parts, or share one component_id across the meshes.  Counting
+    only MESH/CURVE/FONT therefore reported fully built assemblies as missing components
+    and triggered repair rounds that had nothing to repair.  Both layouts are resolved
+    here, while a component is still rejected when nothing in the scene backs it with
+    real geometry, so a bare label can never satisfy a count.
+    """
+    carriers: dict[str, list] = defaultdict(list)
+    for obj in bpy.context.scene.objects:
+        if "quote_relevant" in obj and "exclude_from_quote" in obj:
+            if not bool(obj.get("quote_relevant")) or bool(obj.get("exclude_from_quote")):
+                continue
+        component_id = str(obj.get("component_id", "")).strip()
+        if not component_id or not object_component_types(obj):
+            continue
+        carriers[component_id].append(obj)
+
+    inventory: dict[str, set[str]] = {}
+    for component_id, objects in carriers.items():
+        types: set[str] = set()
+        for obj in objects:
+            types |= object_component_types(obj)
+        if types and any(has_geometry(obj) for obj in objects):
+            inventory[component_id] = types
+    return inventory
+
+
 def check_metadata() -> list:
     relevant = []
     instance_ids = []
@@ -276,11 +323,10 @@ def check_overall(spec: dict, relevant: list) -> None:
                       object=obj.name, dimensions_mm=dims_mm(bound_obj), reference_mm=max_expected)
 
 
-def check_counts(spec: dict, relevant: list) -> None:
+def check_counts(spec: dict, inventory: dict[str, set[str]]) -> None:
     actual = defaultdict(set)
-    for obj in relevant:
-        component_id = str(obj.get("component_id", ""))
-        for component_type in object_component_types(obj):
+    for component_id, types in inventory.items():
+        for component_type in types:
             actual[component_type].add(component_id)
     expected_counts = spec.get("expected_counts", {})
     if not isinstance(expected_counts, dict):
@@ -309,8 +355,8 @@ def check_counts(spec: dict, relevant: list) -> None:
                   component_type=component_type, expected=wanted, actual=count, status=status)
 
 
-def check_required_features(spec: dict, relevant: list) -> None:
-    actual_types = set().union(*(object_component_types(obj) for obj in relevant)) if relevant else set()
+def check_required_features(spec: dict, inventory: dict[str, set[str]]) -> None:
+    actual_types = set().union(*inventory.values()) if inventory else set()
     for feature in spec.get("required_features", []):
         if not isinstance(feature, dict) or not feature.get("required"):
             continue
@@ -502,9 +548,12 @@ def run_check(name: str, function, *args):
 
 spec = run_check("parse_spec", parse_spec) or {}
 relevant_objects = run_check("metadata", check_metadata) or []
+# Component identity is counted over every labelled object, not only meshes, so an
+# aggregate EMPTY that owns the parts still registers its component.
+component_inventory = labelled_components()
 run_check("overall_dimensions", check_overall, spec, relevant_objects)
-run_check("component_counts", check_counts, spec, relevant_objects)
-run_check("required_features", check_required_features, spec, relevant_objects)
+run_check("component_counts", check_counts, spec, component_inventory)
+run_check("required_features", check_required_features, spec, component_inventory)
 run_check("declared_spatial_rules", check_spatial, spec)
 run_check("obvious_structure", check_obvious_structure, relevant_objects)
 run_check("component_evidence", collect_component_evidence, relevant_objects)
