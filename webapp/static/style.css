@@ -922,6 +922,33 @@ body.preview-open { overflow: hidden; }
   background: transparent;
   box-shadow: inset 0 0 0 2px var(--text-3);
 }
+
+.hist-thumb {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  cursor: zoom-in;
+  transition: border-color .18s var(--ease), transform .18s var(--ease-out);
+}
+.hist-thumb:hover {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  transform: scale(1.06);
+}
+.hist-thumb:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.hist-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 @keyframes breathe {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: .35; transform: scale(.82); }

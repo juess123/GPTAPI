@@ -60,6 +60,7 @@
   let timer = null;
   let t0 = 0;
   let previewItem = null;
+  let previewRemote = false;
 
   // ── 阶段文案 ──────────────────────────────────────────────
   const STAGE_TEXT = {
@@ -209,6 +210,7 @@
   function showPreview(item) {
     if (!item || kindOf(item.name) !== "image") return;
     previewItem = item;
+    previewRemote = false;
     const images = imageItems();
     const index = images.indexOf(item);
     el.previewImage.src = previewUrl(item);
@@ -223,15 +225,33 @@
     el.previewClose.focus({ preventScroll: true });
   }
 
+  function showHistoryPreview(job, item) {
+    if (!job || !item) return;
+    previewItem = null;
+    previewRemote = true;
+    const url = `/api/jobs/${encodeURIComponent(job.id)}/input-preview`;
+    el.previewImage.src = url;
+    el.previewImage.alt = item.name || "用户上传的参考图片";
+    el.previewName.textContent = item.name || "参考图片";
+    el.previewMeta.textContent = `${job.id}　·　${fmtSize(item.size || 0)}`;
+    el.previewPrev.hidden = true;
+    el.previewNext.hidden = true;
+    el.preview.hidden = false;
+    document.body.classList.add("preview-open");
+    el.previewClose.focus({ preventScroll: true });
+  }
+
   function closePreview() {
     if (el.preview.hidden) return;
     el.preview.hidden = true;
     el.previewImage.removeAttribute("src");
     document.body.classList.remove("preview-open");
     previewItem = null;
+    previewRemote = false;
   }
 
   function movePreview(step) {
+    if (previewRemote) return;
     const images = imageItems();
     if (!images.length) return closePreview();
     const current = Math.max(0, images.indexOf(previewItem));
@@ -790,6 +810,26 @@
       const dot = document.createElement("span");
       dot.className = "dot " + j.status;
 
+      const firstImage = (j.inputs || []).find((item) => item?.kind === "image");
+      let thumb = null;
+      if (firstImage) {
+        thumb = document.createElement("button");
+        thumb.type = "button";
+        thumb.className = "hist-thumb";
+        thumb.title = `查看 ${firstImage.name}`;
+        thumb.setAttribute("aria-label", `查看上传图片 ${firstImage.name}`);
+        const image = document.createElement("img");
+        image.src = `/api/jobs/${encodeURIComponent(j.id)}/input-preview`;
+        image.alt = "";
+        image.loading = "lazy";
+        image.onerror = () => { thumb.hidden = true; };
+        thumb.append(image);
+        thumb.onclick = (event) => {
+          event.stopPropagation();
+          showHistoryPreview(j, firstImage);
+        };
+      }
+
       // 右栏窄，分两行放：上行任务号，下行状态与输入数量
       const body = document.createElement("div");
       body.className = "hist-body";
@@ -815,7 +855,9 @@
 
       meta.append(st, inp);
       body.append(id, meta);
-      li.append(dot, body);
+      li.append(dot);
+      if (thumb) li.append(thumb);
+      li.append(body);
       li.style.cursor = "pointer";
       li.title = j.id;
       li.onclick = () => {

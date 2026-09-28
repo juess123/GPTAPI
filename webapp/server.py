@@ -13,6 +13,7 @@ A' 流水线 · Web 后端
         ↓  产出 workspaces/<job_id>/output/<时间戳>/final_quote.xlsx + final_model.blend
 
     GET  /api/jobs/<id>/events          SSE 实时进度与日志
+    GET  /api/jobs/<id>/input-preview   首张上传图片（历史缩略图/大图预览）
     GET  /api/jobs/<id>/download/<name> 下载成品
     GET  /api/jobs                     历史任务列表
 
@@ -841,6 +842,30 @@ async def job_events(job_id: str, request: Request) -> StreamingResponse:
         "Cache-Control": "no-cache, no-transform",
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
+    })
+
+
+@app.get("/api/jobs/{job_id}/input-preview")
+async def input_preview(job_id: str) -> FileResponse:
+    """Return only the first uploaded image for history thumbnail/full preview."""
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
+    first_image = next(
+        (item for item in job.inputs
+         if isinstance(item, dict) and item.get("kind") == "image" and item.get("name")),
+        None,
+    )
+    if first_image is None:
+        raise HTTPException(404, "任务没有参考图片")
+
+    input_dir = (job.dir / "input").resolve()
+    target = (input_dir / safe_name(str(first_image["name"]))).resolve()
+    if not target.is_relative_to(input_dir) or not target.is_file() or kind_of(target) != "image":
+        raise HTTPException(404, "参考图片不存在")
+    return FileResponse(target, headers={
+        "Cache-Control": "private, max-age=300",
+        "X-Content-Type-Options": "nosniff",
     })
 
 
