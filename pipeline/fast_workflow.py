@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +26,53 @@ def newest_buildable_run(out_root: Path) -> Path | None:
         and (path / "model_quantities.json").is_file()
     ]
     return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
+
+
+def is_usable_xlsx(path: Path) -> bool:
+    """Reject missing, empty, or truncated Excel files before fallback delivery."""
+    try:
+        return path.is_file() and path.stat().st_size > 0 and zipfile.is_zipfile(path)
+    except OSError:
+        return False
+
+
+def newest_usable_delivery(out_root: Path, preferred: Path | None = None) -> Path | None:
+    """Return the newest directory containing both usable delivery files."""
+    candidates = []
+    if preferred is not None:
+        candidates.append(preferred)
+    candidates.extend(
+        sorted(
+            (path for path in out_root.iterdir() if path.is_dir() and path != preferred),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    )
+    for path in candidates:
+        blend = path / "final_model.blend"
+        try:
+            blend_ok = blend.is_file() and blend.stat().st_size > 0
+        except OSError:
+            blend_ok = False
+        if blend_ok and is_usable_xlsx(path / "final_quote.xlsx"):
+            return path
+    return None
+
+
+def write_degraded_delivery_marker(run_dir: Path, reason: str) -> None:
+    (run_dir / "delivery_warning.json").write_text(
+        json.dumps(
+            {
+                "status": "delivered_with_warnings",
+                "reason": reason,
+                "final_model": str(run_dir / "final_model.blend"),
+                "final_quote": str(run_dir / "final_quote.xlsx"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 def main():
     parser = argparse.ArgumentParser()
@@ -60,6 +108,7 @@ def main():
     blend_repairs = 0
     xlsx_repairs = 0
     xlsx_only_run: Path | None = None
+    selected_run: Path | None = None
     while True:
         if run([sys.executable, str(HERE / "validate_model_spec.py"),
                 "--spec", str(model_spec)]):
@@ -95,8 +144,15 @@ def main():
             return 1
         if report.name == "xlsx_failure.json":
             if xlsx_repairs >= 2:
-                print("[错误] Excel自动修复已达到2次上限", file=sys.stderr)
-                return 1
+                fallback_run = newest_usable_delivery(out_root, report_run)
+                if fallback_run is None:
+                    print("[错误] Excel自动修复已达到2次上限，且没有可用的Excel历史版本", file=sys.stderr)
+                    return 1
+                reason = "Excel自动修复达到2次上限；交付最近一次可正常打开的Excel与对应Blender"
+                write_degraded_delivery_marker(fallback_run, reason)
+                print(f"[警告] {reason}: {fallback_run}", flush=True)
+                selected_run = fallback_run
+                break
             xlsx_repairs += 1
             numbered_report = gen_dir / f"xlsx-failure-attempt-{xlsx_repairs}.json"
             shutil.copy2(report, numbered_report)
@@ -104,6 +160,14 @@ def main():
             if run([sys.executable, str(HERE / "repair_xlsx.py"),
                     "--input-dir", args.input_dir, "--gen-dir", str(gen_dir),
                     "--report", str(numbered_report), "--attempt", str(xlsx_repairs)]):
+                if xlsx_repairs >= 2:
+                    fallback_run = newest_usable_delivery(out_root, report_run)
+                    if fallback_run is not None:
+                        reason = "第2次Excel修复请求失败；交付最近一次可正常打开的Excel与对应Blender"
+                        write_degraded_delivery_marker(fallback_run, reason)
+                        print(f"[警告] {reason}: {fallback_run}", flush=True)
+                        selected_run = fallback_run
+                        break
                 return 1
             xlsx_only_run = report_run
             continue
@@ -130,16 +194,26 @@ def main():
         if run([sys.executable, str(HERE / "repair_blend.py"),
                 "--input-dir", args.input_dir, "--gen-dir", str(gen_dir),
                 "--report", str(numbered_report), "--attempt", str(blend_repairs)]):
+            if blend_repairs >= 2:
+                fallback_run = newest_buildable_run(out_root)
+                if fallback_run is not None:
+                    print(
+                        "[警告] 第2次Blender修复请求失败；回退到最近一次可运行模型，继续生成Excel: "
+                        f"{fallback_run}",
+                        flush=True,
+                    )
+                    xlsx_only_run = fallback_run
+                    continue
             return 1
         xlsx_only_run = None
-    runs = sorted(
+    runs = ([selected_run] if selected_run is not None else sorted(
         (path for path in out_root.iterdir()
          if path.is_dir()
          and (path / "final_model.blend").is_file()
-         and (path / "final_quote.xlsx").is_file()),
+         and is_usable_xlsx(path / "final_quote.xlsx")),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
-    )
+    ))
     if not runs:
         print("[错误] 流程结束但没有同时包含Blend与Excel的完整输出目录", file=sys.stderr)
         return 1

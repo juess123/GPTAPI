@@ -509,6 +509,39 @@ def extract_dependencies(text: str) -> dict[str, list[str]]:
     return result
 
 
+def validate_generated_output(text: str) -> tuple[dict[str, str], dict[str, list[str]], list[str]]:
+    """Validate the complete delivery envelope before writing generated scripts."""
+    issues: list[str] = []
+    files = extract_files(text)
+    missing = [name for name in WANTED if name not in files]
+    if missing:
+        issues.append(f"缺少完整文件块：{missing}")
+
+    for name in WANTED:
+        code = files.get(name)
+        if code is None:
+            continue
+        if not code.strip():
+            issues.append(f"{name}代码为空")
+            continue
+        try:
+            compile(code, name, "exec")
+        except SyntaxError as error:
+            location = f"第{error.lineno or '?'}行"
+            issues.append(f"{name}语法不完整或无效（{location}：{error.msg}）")
+
+    if not re.search(r"<<<DEPENDENCIES>>>(.*?)<<<ENDDEPENDENCIES>>>", text, re.S):
+        dependencies = {"python": [], "blender": []}
+        issues.append("缺少完整DEPENDENCIES块")
+    else:
+        try:
+            dependencies = extract_dependencies(text)
+        except ValueError as error:
+            dependencies = {"python": [], "blender": []}
+            issues.append(str(error))
+    return files, dependencies, issues
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ask_model.py",
@@ -651,8 +684,10 @@ def main(argv: list[str] | None = None) -> int:
     for n in notes:
         print(n)
     print(f"材料长度: {len(materials)} 字符    图片: {len(images)} 张")
-    print(f"超时    : {fmt_duration(timeout)} / 次    尝试次数: {attempts}    max_tokens: {max_tokens}")
-    print(f"最坏耗时: {fmt_duration(timeout * attempts)}")
+    content_attempts = 2
+    print(f"超时    : {fmt_duration(timeout)} / 次    网络尝试: {attempts}    max_tokens: {max_tokens}")
+    print(f"内容完整性尝试: {content_attempts} 次")
+    print(f"最坏耗时: {fmt_duration(timeout * attempts * content_attempts)}")
 
     if args.dry_run:
         print("\n[dry-run] 以下是将要发送的提示词，未实际请求：\n")
@@ -666,62 +701,96 @@ def main(argv: list[str] | None = None) -> int:
                       f"（{len(im['image_url']['url'])} 字符）")
         return 0
 
-    t0 = time.time()
-    try:
-        result = post_json(
-            url,
-            {
-                "model": model,
-                "messages": [{"role": "user", "content": content}],
-                "max_tokens": max_tokens,
-            },
-            key,
-            timeout=timeout,
-            max_attempts=attempts,
-        )
-    except KeyboardInterrupt:
-        print("\n\n已手动取消（Ctrl+C）。未产生任何文件变更。")
-        print("提示：生成完整脚本的请求通常需要 20~60 秒，请耐心等待心跳输出。")
-        return 130
-    except RuntimeError as e:
-        print(f"\n错误：{e}")
-        return 1
-
-    elapsed = time.time() - t0
-
     GEN.mkdir(parents=True, exist_ok=True)
-    (GEN / "raw_model_response.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    result = None
+    model_text = ""
+    files: dict[str, str] = {}
+    dependencies: dict[str, list[str]] = {"python": [], "blender": []}
+    issues: list[str] = []
+    total_t0 = time.time()
+    request_content = content
+    for content_attempt in range(1, content_attempts + 1):
+        print(f"  内容完整性尝试 {content_attempt}/{content_attempts}", flush=True)
+        attempt_t0 = time.time()
+        try:
+            result = post_json(
+                url,
+                {
+                    "model": model,
+                    "messages": [{"role": "user", "content": request_content}],
+                    "max_tokens": max_tokens,
+                },
+                key,
+                timeout=timeout,
+                max_attempts=attempts,
+            )
+        except KeyboardInterrupt:
+            print("\n\n已手动取消（Ctrl+C）。未产生任何文件变更。")
+            print("提示：生成完整脚本的请求通常需要较长时间，请耐心等待心跳输出。")
+            return 130
+        except RuntimeError as error:
+            print(f"\n错误：{error}")
+            return 1
 
-    try:
-        content = result["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
-        print("错误：响应结构异常，详见 generated/raw_model_response.json")
+        (GEN / f"raw_model_response_attempt_{content_attempt}.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        try:
+            model_text = result["choices"][0]["message"]["content"]
+            if not isinstance(model_text, str):
+                raise TypeError("message.content不是字符串")
+        except (KeyError, IndexError, TypeError) as error:
+            issues = [f"响应结构异常：{error}"]
+            model_text = ""
+        else:
+            files, dependencies, issues = validate_generated_output(model_text)
+
+        usage = result.get("usage", {})
+        print(f"  ↳ 内容响应完成: {fmt_duration(time.time() - attempt_t0)}   "
+              f"tokens={usage.get('total_tokens')}", flush=True)
+        if not issues:
+            break
+
+        (GEN / f"model_text_attempt_{content_attempt}.txt").write_text(
+            model_text, encoding="utf-8"
+        )
+        print(f"  内容不完整（{content_attempt}/{content_attempts}）："
+              + "；".join(issues), flush=True)
+        if content_attempt < content_attempts:
+            correction = (
+                "\n\n==================== 上一响应无效，必须完整重做 ====================\n"
+                f"上一响应的问题：{'；'.join(issues)}\n"
+                "不要续写上一响应，也不要只补缺失片段。请从 <<<DEPENDENCIES>>> 开始，"
+                "严格按原输出格式重新给出完整的 dependencies.json、make_xlsx.py、"
+                "make_blend.py，两个脚本都必须有 <<<ENDFILE>>>，且代码必须语法完整。\n"
+                "=======================================================================\n"
+            )
+            request_content = [{"type": "text", "text": prompt + correction}]
+            if images:
+                request_content.append({
+                    "type": "text",
+                    "text": "以下仍是同一任务的参考图片，请据此完整重做两个脚本：",
+                })
+                request_content.extend(images)
+
+    if result is not None:
+        (GEN / "raw_model_response.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    if issues:
+        (GEN / "model_text.txt").write_text(model_text, encoding="utf-8")
+        print(f"错误：模型连续 {content_attempts} 次没有返回完整可执行交付："
+              + "；".join(issues))
+        print("模型最后一次原始文本已存至 generated/model_text.txt")
         return 1
 
-    usage = result.get("usage", {})
-    print(f"完成    : {fmt_duration(elapsed)}   tokens={usage.get('total_tokens')}")
-
-    files = extract_files(content)
-    missing = [n for n in WANTED if n not in files]
-    if missing:
-        print(f"错误：模型未按要求输出这些脚本 -> {missing}")
-        (GEN / "model_text.txt").write_text(content, encoding="utf-8")
-        print("模型原始文本已存至 generated/model_text.txt")
-        return 1
+    print(f"完成    : {fmt_duration(time.time() - total_t0)}   内容已通过完整性检查")
 
     for name in WANTED:
         p = GEN / name
         p.write_text(files[name], encoding="utf-8")
         print(f"已生成 : {p}  ({len(files[name].splitlines())} 行)")
 
-    try:
-        dependencies = extract_dependencies(content)
-    except ValueError as error:
-        print(f"错误：{error}")
-        (GEN / "model_text.txt").write_text(content, encoding="utf-8")
-        return 1
     dependency_path = GEN / "dependencies.json"
     dependency_path.write_text(
         json.dumps(dependencies, ensure_ascii=False, indent=2), encoding="utf-8"
